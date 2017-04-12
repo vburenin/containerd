@@ -15,6 +15,7 @@ import (
 	google_protobuf "github.com/golang/protobuf/ptypes/empty"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
+	"golang.org/x/sys/unix"
 )
 
 var empty = &google_protobuf.Empty{}
@@ -180,7 +181,7 @@ func (s *Service) State(ctx context.Context, r *shimapi.StateRequest) (*shimapi.
 	defer s.mu.Unlock()
 	for _, p := range s.processes {
 		status := container.Status_RUNNING
-		if err := syscall.Kill(p.Pid(), 0); err != nil {
+		if err := unix.Kill(p.Pid(), 0); err != nil {
 			if err != syscall.ESRCH {
 				return nil, err
 			}
@@ -210,7 +211,7 @@ func (s *Service) Resume(ctx context.Context, r *shimapi.ResumeRequest) (*google
 
 func (s *Service) Exit(ctx context.Context, r *shimapi.ExitRequest) (*google_protobuf.Empty, error) {
 	// signal ourself to exit
-	if err := syscall.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
+	if err := unix.Kill(os.Getpid(), syscall.SIGTERM); err != nil {
 		return nil, err
 	}
 	return empty, nil
@@ -228,6 +229,17 @@ func (s *Service) Kill(ctx context.Context, r *shimapi.KillRequest) (*google_pro
 		return nil, fmt.Errorf("process does not exist %d", r.Pid)
 	}
 	if err := proc.Signal(int(r.Signal)); err != nil {
+		return nil, err
+	}
+	return empty, nil
+}
+
+func (s *Service) CloseStdin(ctx context.Context, r *shimapi.CloseStdinRequest) (*google_protobuf.Empty, error) {
+	p, ok := s.processes[int(r.Pid)]
+	if !ok {
+		return nil, fmt.Errorf("process does not exist %d", r.Pid)
+	}
+	if err := p.Stdin().Close(); err != nil {
 		return nil, err
 	}
 	return empty, nil

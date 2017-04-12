@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
+	"github.com/Sirupsen/logrus"
 	"github.com/containerd/containerd/api/services/execution"
 	rootfsapi "github.com/containerd/containerd/api/services/rootfs"
 	"github.com/containerd/containerd/images"
@@ -37,6 +38,10 @@ var runCommand = cli.Command{
 			Name:  "runtime",
 			Usage: "runtime name (linux, windows, vmware-linux)",
 			Value: "linux",
+		},
+		cli.StringFlag{
+			Name:  "runtime-config",
+			Usage: "set the OCI config file for the container",
 		},
 		cli.BoolFlag{
 			Name:  "readonly",
@@ -143,8 +148,9 @@ var runCommand = cli.Command{
 		if resp != nil {
 			create.Rootfs = resp.Mounts
 		}
+		var con console.Console
 		if create.Terminal {
-			con := console.Current()
+			con = console.Current()
 			defer con.Reset()
 			if err := con.SetRaw(); err != nil {
 				return err
@@ -159,12 +165,16 @@ var runCommand = cli.Command{
 		if err != nil {
 			return err
 		}
+		if create.Terminal {
+			if err := handleConsoleResize(ctx, containers, response.ID, response.Pid, con); err != nil {
+				logrus.WithError(err).Error("console resize")
+			}
+		}
 		if _, err := containers.Start(ctx, &execution.StartRequest{
 			ID: response.ID,
 		}); err != nil {
 			return err
 		}
-
 		// Ensure we read all io only if container started successfully.
 		defer fwg.Wait()
 

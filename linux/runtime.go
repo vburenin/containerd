@@ -9,7 +9,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"github.com/containerd/containerd"
@@ -21,6 +20,7 @@ import (
 	runc "github.com/crosbymichael/go-runc"
 
 	"golang.org/x/net/context"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -112,10 +112,7 @@ func (r *Runtime) Create(ctx context.Context, id string, opts containerd.CreateO
 		os.RemoveAll(path)
 		return nil, err
 	}
-	c := &Container{
-		id:   id,
-		shim: s,
-	}
+	c := newContainer(id, s)
 	// after the container is create add it to the monitor
 	if err := r.monitor.Monitor(c); err != nil {
 		return nil, err
@@ -252,9 +249,9 @@ func (r *Runtime) killContainer(ctx context.Context, id string) {
 		// TODO: get Command provided for initial container creation
 		//	Command:      r.Runtime,
 		LogFormat:    runc.JSON,
-		PdeathSignal: syscall.SIGKILL,
+		PdeathSignal: unix.SIGKILL,
 	}
-	if err := runtime.Kill(ctx, id, int(syscall.SIGKILL), &runc.KillOpts{
+	if err := runtime.Kill(ctx, id, int(unix.SIGKILL), &runc.KillOpts{
 		All: true,
 	}); err != nil {
 		log.G(ctx).WithError(err).Warnf("kill all processes for %s", id)
@@ -274,7 +271,7 @@ func (r *Runtime) killContainer(ctx context.Context, id string) {
 		log.G(ctx).WithError(err).Warnf("delete container %s", id)
 	}
 	// try to unmount the rootfs is it was not held by an external shim
-	syscall.Unmount(filepath.Join(r.root, id, "rootfs"), 0)
+	unix.Unmount(filepath.Join(r.root, id, "rootfs"), 0)
 	// remove container bundle
 	if err := r.deleteBundle(id); err != nil {
 		log.G(ctx).WithError(err).Warnf("delete container bundle %s", id)
