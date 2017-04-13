@@ -170,7 +170,7 @@ func (p *PortLayerShim) commitHandle(ctx context.Context, h string) error {
 }
 
 func (p *PortLayerShim) runIOServers(ctx context.Context) error {
-	var socket *runc.ConsoleSocket
+	var socket *runc.Socket
 	var err error
 
 	if p.tty {
@@ -421,6 +421,17 @@ func (p *PortLayerShim) Kill(ctx context.Context, r *shim.KillRequest) (*empty.E
 	//	return nil, fmt.Errorf("process does not exist %d", r.Pid)
 	//}
 	//if err := proc.Signal(int(r.Signal)); err != nil {
+	//	return nil, err
+	//}
+	return protobufEmpty, nil
+}
+
+func (p *PortLayerShim) CloseStdin(ctx context.Context, r *shim.CloseStdinRequest) (*empty.Empty, error) {
+	//p, ok := s.processes[int(r.Pid)]
+	//if !ok {
+	//	return nil, fmt.Errorf("process does not exist %d", r.Pid)
+	//}
+	//if err := p.Stdin().Close(); err != nil {
 	//	return nil, err
 	//}
 	return protobufEmpty, nil

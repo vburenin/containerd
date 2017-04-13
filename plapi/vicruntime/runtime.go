@@ -114,7 +114,7 @@ func (r *Runtime) Delete(ctx context.Context, c containerd.Container) (uint32, e
 	return 0, r.deleteBundle(lc.id)
 }
 
-func (r *Runtime) Containers() ([]containerd.Container, error) {
+func (r *Runtime) Containers(ctx context.Context) ([]containerd.Container, error) {
 
 	var o []containerd.Container
 
