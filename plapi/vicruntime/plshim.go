@@ -37,7 +37,7 @@ var protobufEmpty = &empty.Empty{}
 
 func PortLayerClient() *client.PortLayer {
 	plonce.Do(func() {
-		cfg := client.DefaultTransportConfig().WithHost("10.0.1.80:2390")
+		cfg := client.DefaultTransportConfig().WithHost("172.16.165.130:2390")
 		plClient = client.NewHTTPClientWithConfig(nil, cfg)
 	})
 	return plClient
