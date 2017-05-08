@@ -172,6 +172,36 @@ func (a *Client) Unbind(params *UnbindParams) (*UnbindOK, error) {
 
 }
 
+/*
+Wait initiates an task wait operation
+
+Initiates an task wait operation
+*/
+func (a *Client) Wait(params *WaitParams) (*WaitOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewWaitParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "Wait",
+		Method:             "PUT",
+		PathPattern:        "/tasks",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json", "application/octet-stream"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &WaitReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*WaitOK), nil
+
+}
+
 // SetTransport changes the transport on the client
 func (a *Client) SetTransport(transport runtime.ClientTransport) {
 	a.transport = transport

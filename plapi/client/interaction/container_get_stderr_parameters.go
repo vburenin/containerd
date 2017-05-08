@@ -128,7 +128,9 @@ func (o *ContainerGetStderrParams) SetID(id string) {
 // WriteToRequest writes these params to a swagger request
 func (o *ContainerGetStderrParams) WriteToRequest(r runtime.ClientRequest, reg strfmt.Registry) error {
 
-	r.SetTimeout(o.timeout)
+	if err := r.SetTimeout(o.timeout); err != nil {
+		return err
+	}
 	var res []error
 
 	if o.Deadline != nil {

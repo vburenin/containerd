@@ -114,7 +114,7 @@ func NewInspectInternalServerError() *InspectInternalServerError {
 
 /*InspectInternalServerError handles this case with default header values.
 
-Join of task failed
+Inspect of task failed
 */
 type InspectInternalServerError struct {
 	Payload *models.Error

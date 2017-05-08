@@ -129,7 +129,9 @@ func (o *ContainerWaitParams) SetTimeout(timeout int64) {
 // WriteToRequest writes these params to a swagger request
 func (o *ContainerWaitParams) WriteToRequest(r runtime.ClientRequest, reg strfmt.Registry) error {
 
-	r.SetTimeout(o.requestTimeout)
+	if err := r.SetTimeout(o.requestTimeout); err != nil {
+		return err
+	}
 	var res []error
 
 	// path param id

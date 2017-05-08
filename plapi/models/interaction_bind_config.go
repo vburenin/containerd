@@ -7,6 +7,7 @@ import (
 	strfmt "github.com/go-openapi/strfmt"
 
 	"github.com/go-openapi/errors"
+	"github.com/go-openapi/validate"
 )
 
 // InteractionBindConfig interaction bind config
@@ -16,6 +17,10 @@ type InteractionBindConfig struct {
 	// handle
 	// Required: true
 	Handle interface{} `json:"handle"`
+
+	// id
+	// Required: true
+	ID string `json:"id"`
 }
 
 // Validate validates this interaction bind config
@@ -27,6 +32,11 @@ func (m *InteractionBindConfig) Validate(formats strfmt.Registry) error {
 		res = append(res, err)
 	}
 
+	if err := m.validateID(formats); err != nil {
+		// prop
+		res = append(res, err)
+	}
+
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
@@ -34,6 +44,15 @@ func (m *InteractionBindConfig) Validate(formats strfmt.Registry) error {
 }
 
 func (m *InteractionBindConfig) validateHandle(formats strfmt.Registry) error {
+
+	return nil
+}
+
+func (m *InteractionBindConfig) validateID(formats strfmt.Registry) error {
+
+	if err := validate.RequiredString("id", "body", string(m.ID)); err != nil {
+		return err
+	}
 
 	return nil
 }

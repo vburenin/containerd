@@ -117,7 +117,9 @@ func (o *CreateScopeParams) SetConfig(config *models.ScopeConfig) {
 // WriteToRequest writes these params to a swagger request
 func (o *CreateScopeParams) WriteToRequest(r runtime.ClientRequest, reg strfmt.Registry) error {
 
-	r.SetTimeout(o.timeout)
+	if err := r.SetTimeout(o.timeout); err != nil {
+		return err
+	}
 	var res []error
 
 	if o.Config == nil {
