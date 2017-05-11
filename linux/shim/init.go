@@ -13,11 +13,11 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/containerd/console"
 	"github.com/containerd/containerd"
 	shimapi "github.com/containerd/containerd/api/services/shim"
-	"github.com/crosbymichael/console"
-	runc "github.com/crosbymichael/go-runc"
-	"github.com/tonistiigi/fifo"
+	"github.com/containerd/fifo"
+	runc "github.com/containerd/go-runc"
 )
 
 type initProcess struct {
@@ -93,20 +93,22 @@ func newInitProcess(context context.Context, path string, r *shimapi.CreateReque
 		p.stdin = sc
 		p.closers = append(p.closers, sc)
 	}
+	var copyWaitGroup sync.WaitGroup
 	if socket != nil {
 		console, err := socket.ReceiveMaster()
 		if err != nil {
 			return nil, err
 		}
 		p.console = console
-		if err := copyConsole(context, console, r.Stdin, r.Stdout, r.Stderr, &p.WaitGroup); err != nil {
+		if err := copyConsole(context, console, r.Stdin, r.Stdout, r.Stderr, &p.WaitGroup, &copyWaitGroup); err != nil {
 			return nil, err
 		}
 	} else {
-		if err := copyPipes(context, io, r.Stdin, r.Stdout, r.Stderr, &p.WaitGroup); err != nil {
+		if err := copyPipes(context, io, r.Stdin, r.Stdout, r.Stderr, &p.WaitGroup, &copyWaitGroup); err != nil {
 			return nil, err
 		}
 	}
+	copyWaitGroup.Wait()
 	pid, err := runc.ReadPidFile(opts.PidFile)
 	if err != nil {
 		return nil, err

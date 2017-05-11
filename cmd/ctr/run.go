@@ -11,10 +11,10 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/containerd/console"
 	"github.com/containerd/containerd/api/services/execution"
 	rootfsapi "github.com/containerd/containerd/api/services/rootfs"
 	"github.com/containerd/containerd/images"
-	"github.com/crosbymichael/console"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
@@ -33,6 +33,10 @@ var runCommand = cli.Command{
 		cli.BoolFlag{
 			Name:  "tty,t",
 			Usage: "allocate a TTY for the container",
+		},
+		cli.StringFlag{
+			Name:  "rootfs",
+			Usage: "path to rootfs",
 		},
 		cli.StringFlag{
 			Name:  "runtime",
@@ -74,7 +78,7 @@ var runCommand = cli.Command{
 			return err
 		}
 
-		provider, err := getContentProvider(context)
+		content, err := getContentStore(context)
 		if err != nil {
 			return err
 		}
@@ -89,7 +93,7 @@ var runCommand = cli.Command{
 			return errors.Wrap(err, "failed resolving image store")
 		}
 
-		if runtime.GOOS != "windows" {
+		if runtime.GOOS != "windows" && context.String("rootfs") == "" {
 			ref := context.Args().First()
 
 			image, err := imageStore.Get(ctx, ref)
@@ -98,7 +102,7 @@ var runCommand = cli.Command{
 			}
 			// let's close out our db and tx so we don't hold the lock whilst running.
 
-			diffIDs, err := image.RootFS(ctx, provider)
+			diffIDs, err := image.RootFS(ctx, content)
 			if err != nil {
 				return err
 			}
@@ -119,13 +123,13 @@ var runCommand = cli.Command{
 				return err
 			}
 
-			ic, err := image.Config(ctx, provider)
+			ic, err := image.Config(ctx, content)
 			if err != nil {
 				return err
 			}
 			switch ic.MediaType {
 			case ocispec.MediaTypeImageConfig, images.MediaTypeDockerSchema2Config:
-				r, err := provider.Reader(ctx, ic.Digest)
+				r, err := content.Reader(ctx, ic.Digest)
 				if err != nil {
 					return err
 				}
@@ -141,7 +145,7 @@ var runCommand = cli.Command{
 			// TODO: get the image / rootfs through the API once windows has a snapshotter
 		}
 
-		create, err := newCreateRequest(context, &imageConfig.Config, id, tmpDir)
+		create, err := newCreateRequest(context, &imageConfig.Config, id, tmpDir, context.String("rootfs"))
 		if err != nil {
 			return err
 		}

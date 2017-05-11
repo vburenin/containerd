@@ -8,11 +8,9 @@ import (
 	"os"
 	"strings"
 
-	contentapi "github.com/containerd/containerd/api/services/content"
 	rootfsapi "github.com/containerd/containerd/api/services/rootfs"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/log"
-	contentservice "github.com/containerd/containerd/services/content"
 	rootfsservice "github.com/containerd/containerd/services/rootfs"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -34,9 +32,8 @@ var rootfsUnpackCommand = cli.Command{
 	ArgsUsage: "[flags] <digest>",
 	Flags:     []cli.Flag{},
 	Action: func(clicontext *cli.Context) error {
-		var (
-			ctx = background
-		)
+		ctx, cancel := appContext()
+		defer cancel()
 
 		dgst, err := digest.Parse(clicontext.Args().First())
 		if err != nil {
@@ -50,8 +47,12 @@ var rootfsUnpackCommand = cli.Command{
 			return err
 		}
 
-		provider := contentservice.NewProviderFromClient(contentapi.NewContentClient(conn))
-		m, err := resolveManifest(ctx, provider, dgst)
+		cs, err := resolveContentStore(clicontext)
+		if err != nil {
+			return err
+		}
+
+		m, err := resolveManifest(ctx, cs, dgst)
 		if err != nil {
 			return err
 		}
@@ -74,9 +75,8 @@ var rootfsPrepareCommand = cli.Command{
 	ArgsUsage: "[flags] <digest> <target>",
 	Flags:     []cli.Flag{},
 	Action: func(clicontext *cli.Context) error {
-		var (
-			ctx = background
-		)
+		ctx, cancel := appContext()
+		defer cancel()
 
 		if clicontext.NArg() != 2 {
 			return cli.ShowSubcommandHelp(clicontext)

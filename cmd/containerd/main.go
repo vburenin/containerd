@@ -14,6 +14,7 @@ import (
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	gocontext "golang.org/x/net/context"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/containerd/containerd"
@@ -241,7 +242,7 @@ func serveDebugAPI() error {
 	return nil
 }
 
-func resolveContentStore() (*content.Store, error) {
+func resolveContentStore() (content.Store, error) {
 	cp := filepath.Join(conf.Root, "content")
 	return content.NewStore(cp)
 }
@@ -314,7 +315,7 @@ func loadMonitor() (plugin.ContainerMonitor, error) {
 	return plugin.NewMultiContainerMonitor(monitors...), nil
 }
 
-func loadSnapshotter(store *content.Store) (snapshot.Snapshotter, error) {
+func loadSnapshotter(store content.Store) (snapshot.Snapshotter, error) {
 	for name, sr := range plugin.Registrations() {
 		if sr.Type != plugin.SnapshotPlugin {
 			continue
@@ -355,7 +356,7 @@ func newGRPCServer() *grpc.Server {
 	return s
 }
 
-func loadServices(runtimes map[string]containerd.Runtime, store *content.Store, sn snapshot.Snapshotter, meta *bolt.DB) ([]plugin.Service, error) {
+func loadServices(runtimes map[string]containerd.Runtime, store content.Store, sn snapshot.Snapshotter, meta *bolt.DB) ([]plugin.Service, error) {
 	var o []plugin.Service
 	for name, sr := range plugin.Registrations() {
 		if sr.Type != plugin.GRPCPlugin {
@@ -419,8 +420,10 @@ func interceptor(ctx gocontext.Context,
 		ctx = log.WithModule(ctx, "rootfs")
 	case imagesapi.ImagesServer:
 		ctx = log.WithModule(ctx, "images")
+	case grpc_health_v1.HealthServer:
+		// No need to change the context
 	default:
-		fmt.Printf("unknown GRPC server type: %#v\n", info.Server)
+		log.G(ctx).Warnf("unknown GRPC server type: %#v\n", info.Server)
 	}
 	return grpc_prometheus.UnaryServerInterceptor(ctx, req, info, handler)
 }
