@@ -4,11 +4,13 @@ package linux
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/containerd/containerd"
@@ -19,7 +21,6 @@ import (
 	"github.com/containerd/containerd/plugin"
 	runc "github.com/containerd/go-runc"
 
-	"golang.org/x/net/context"
 	"golang.org/x/sys/unix"
 )
 
@@ -27,23 +28,29 @@ const (
 	runtimeName    = "linux"
 	configFilename = "config.json"
 	defaultRuntime = "runc"
+	defaultShim    = "containerd-shim"
 )
 
 func init() {
 	plugin.Register(runtimeName, &plugin.Registration{
-		Type:   plugin.RuntimePlugin,
-		Init:   New,
-		Config: &Config{},
+		Type: plugin.RuntimePlugin,
+		Init: New,
+		Config: &Config{
+			Shim:    defaultShim,
+			Runtime: defaultRuntime,
+		},
 	})
 }
 
-var _ = (containerd.Runtime)(&Runtime{})
+var _ = (plugin.Runtime)(&Runtime{})
 
 type Config struct {
+	// Shim is a path or name of binary implementing the Shim GRPC API
+	Shim string `toml:"shim,omitempty"`
 	// Runtime is a path or name of an OCI runtime used by the shim
-	Runtime string `toml:"runtime"`
+	Runtime string `toml:"runtime,omitempty"`
 	// NoShim calls runc directly from within the pkg
-	NoShim bool `toml:"no_shim"`
+	NoShim bool `toml:"no_shim,omitempty"`
 }
 
 func New(ic *plugin.InitContext) (interface{}, error) {
@@ -52,13 +59,11 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 		return nil, err
 	}
 	cfg := ic.Config.(*Config)
-	if cfg.Runtime == "" {
-		cfg.Runtime = defaultRuntime
-	}
 	c, cancel := context.WithCancel(ic.Context)
 	r := &Runtime{
 		root:          path,
 		remote:        !cfg.NoShim,
+		shim:          cfg.Shim,
 		runtime:       cfg.Runtime,
 		events:        make(chan *containerd.Event, 2048),
 		eventsContext: c,
@@ -72,6 +77,7 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 
 type Runtime struct {
 	root    string
+	shim    string
 	runtime string
 	remote  bool
 
@@ -81,12 +87,12 @@ type Runtime struct {
 	monitor       plugin.ContainerMonitor
 }
 
-func (r *Runtime) Create(ctx context.Context, id string, opts containerd.CreateOpts) (containerd.Container, error) {
+func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts) (plugin.Container, error) {
 	path, err := r.newBundle(id, opts.Spec)
 	if err != nil {
 		return nil, err
 	}
-	s, err := newShim(path, r.remote)
+	s, err := newShim(r.shim, path, r.remote)
 	if err != nil {
 		os.RemoveAll(path)
 		return nil, err
@@ -123,7 +129,7 @@ func (r *Runtime) Create(ctx context.Context, id string, opts containerd.CreateO
 	return c, nil
 }
 
-func (r *Runtime) Delete(ctx context.Context, c containerd.Container) (*containerd.Exit, error) {
+func (r *Runtime) Delete(ctx context.Context, c plugin.Container) (*plugin.Exit, error) {
 	lc, ok := c.(*Container)
 	if !ok {
 		return nil, fmt.Errorf("container cannot be cast as *linux.Container")
@@ -138,18 +144,18 @@ func (r *Runtime) Delete(ctx context.Context, c containerd.Container) (*containe
 		return nil, err
 	}
 	lc.shim.Exit(ctx, &shim.ExitRequest{})
-	return &containerd.Exit{
+	return &plugin.Exit{
 		Status:    rsp.ExitStatus,
 		Timestamp: rsp.ExitedAt,
 	}, r.deleteBundle(lc.id)
 }
 
-func (r *Runtime) Containers(ctx context.Context) ([]containerd.Container, error) {
+func (r *Runtime) Containers(ctx context.Context) ([]plugin.Container, error) {
 	dir, err := ioutil.ReadDir(r.root)
 	if err != nil {
 		return nil, err
 	}
-	var o []containerd.Container
+	var o []plugin.Container
 	for _, fi := range dir {
 		if !fi.IsDir() {
 			continue
@@ -187,7 +193,9 @@ func (r *Runtime) forward(events shim.Shim_EventsClient) {
 	for {
 		e, err := events.Recv()
 		if err != nil {
-			log.G(r.eventsContext).WithError(err).Error("get event from shim")
+			if !strings.HasSuffix(err.Error(), "transport is closing") {
+				log.G(r.eventsContext).WithError(err).Error("get event from shim")
+			}
 			return
 		}
 		var et containerd.EventType

@@ -4,8 +4,9 @@ ROOTDIR=$(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 # Base path used to install.
 DESTDIR=/usr/local
 
-# Used to populate version variable in main package.
+# Used to populate variables in version package.
 VERSION=$(shell git describe --match 'v[0-9]*' --dirty='.m' --always)
+REVISION=$(shell git rev-parse HEAD)$(shell if ! git diff --no-ext-diff --quiet --exit-code; then echo .m; fi)
 
 PKG=github.com/containerd/containerd
 
@@ -28,7 +29,7 @@ SNAPSHOT_PACKAGES=$(shell go list ./snapshot/...)
 
 # Project binaries.
 COMMANDS=ctr containerd protoc-gen-gogoctrd dist ctrd-protobuild
-ifeq ("$(GOOS)", "linux")
+ifneq ("$(GOOS)", "windows")
 	COMMANDS += containerd-shim
 endif
 BINARIES=$(addprefix bin/,$(COMMANDS))
@@ -36,8 +37,8 @@ ifeq ("$(GOOS)", "windows")
 	BINARY_SUFFIX=".exe"
 endif
 
-
-GO_LDFLAGS=-ldflags "-X $(PKG).Version=$(VERSION) -X $(PKG).Package=$(PKG)"
+GO_TAGS=$(if $(BUILDTAGS),-tags "$(BUILDTAGS)",)
+GO_LDFLAGS=-ldflags "-X $(PKG)/version.Version=$(VERSION) -X $(PKG)/version.Revision=$(REVISION) -X $(PKG)/version.Package=$(PKG)"
 
 # Flags passed to `go test`
 TESTFLAGS ?=-parallel 8 -race
@@ -135,7 +136,7 @@ bin/%: cmd/% FORCE
 	@test $$(go list) = "${PKG}" || \
 		(echo "$(ONI) Please correctly set up your Go build environment. This project must be located at <GOPATH>/src/${PKG}" && false)
 	@echo "$(WHALE) $@${BINARY_SUFFIX}"
-	@go build -i -o $@${BINARY_SUFFIX} ${GO_LDFLAGS}  ${GO_GCFLAGS} ./$<
+	@go build -i -o $@${BINARY_SUFFIX} ${GO_LDFLAGS} ${GO_TAGS} ${GO_GCFLAGS} ./$<
 
 binaries: $(BINARIES) ## build binaries
 	@echo "$(WHALE) $@"

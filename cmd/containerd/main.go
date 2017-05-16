@@ -17,17 +17,18 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/containerd/containerd"
 	contentapi "github.com/containerd/containerd/api/services/content"
 	api "github.com/containerd/containerd/api/services/execution"
 	imagesapi "github.com/containerd/containerd/api/services/images"
 	rootfsapi "github.com/containerd/containerd/api/services/rootfs"
+	versionapi "github.com/containerd/containerd/api/services/version"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/snapshot"
 	"github.com/containerd/containerd/sys"
+	"github.com/containerd/containerd/version"
 	metrics "github.com/docker/go-metrics"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
@@ -50,14 +51,14 @@ var (
 
 func init() {
 	cli.VersionPrinter = func(c *cli.Context) {
-		fmt.Println(c.App.Name, containerd.Package, c.App.Version)
+		fmt.Println(c.App.Name, version.Package, c.App.Version)
 	}
 }
 
 func main() {
 	app := cli.NewApp()
 	app.Name = "containerd"
-	app.Version = containerd.Version
+	app.Version = version.Version
 	app.Usage = usage
 	app.Flags = []cli.Flag{
 		cli.StringFlag{
@@ -263,8 +264,8 @@ func resolveMetaDB(ctx *cli.Context) (*bolt.DB, error) {
 	return db, nil
 }
 
-func loadRuntimes(monitor plugin.ContainerMonitor) (map[string]containerd.Runtime, error) {
-	o := make(map[string]containerd.Runtime)
+func loadRuntimes(monitor plugin.ContainerMonitor) (map[string]plugin.Runtime, error) {
+	o := make(map[string]plugin.Runtime)
 	for name, rr := range plugin.Registrations() {
 		if rr.Type != plugin.RuntimePlugin {
 			continue
@@ -286,7 +287,7 @@ func loadRuntimes(monitor plugin.ContainerMonitor) (map[string]containerd.Runtim
 		if err != nil {
 			return nil, err
 		}
-		o[name] = vr.(containerd.Runtime)
+		o[name] = vr.(plugin.Runtime)
 	}
 	return o, nil
 }
@@ -356,7 +357,7 @@ func newGRPCServer() *grpc.Server {
 	return s
 }
 
-func loadServices(runtimes map[string]containerd.Runtime, store content.Store, sn snapshot.Snapshotter, meta *bolt.DB) ([]plugin.Service, error) {
+func loadServices(runtimes map[string]plugin.Runtime, store content.Store, sn snapshot.Snapshotter, meta *bolt.DB) ([]plugin.Service, error) {
 	var o []plugin.Service
 	for name, sr := range plugin.Registrations() {
 		if sr.Type != plugin.GRPCPlugin {
@@ -422,6 +423,8 @@ func interceptor(ctx gocontext.Context,
 		ctx = log.WithModule(ctx, "images")
 	case grpc_health_v1.HealthServer:
 		// No need to change the context
+	case versionapi.VersionServer:
+		ctx = log.WithModule(ctx, "version")
 	default:
 		log.G(ctx).Warnf("unknown GRPC server type: %#v\n", info.Server)
 	}
