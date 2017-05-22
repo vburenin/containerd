@@ -160,16 +160,16 @@ func (s *Service) State(ctx context.Context, r *shimapi.StateRequest) (*shimapi.
 	if err != nil {
 		return nil, err
 	}
-	status := container.Status_UNKNOWN
+	status := container.StatusUnknown
 	switch st {
 	case "created":
-		status = container.Status_CREATED
+		status = container.StatusCreated
 	case "running":
-		status = container.Status_RUNNING
+		status = container.StatusRunning
 	case "stopped":
-		status = container.Status_STOPPED
+		status = container.StatusStopped
 	case "paused":
-		status = container.Status_PAUSED
+		status = container.StatusPaused
 	}
 	o := &shimapi.StateResponse{
 		ID:        s.id,
@@ -181,12 +181,12 @@ func (s *Service) State(ctx context.Context, r *shimapi.StateRequest) (*shimapi.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, p := range s.processes {
-		status := container.Status_RUNNING
+		status := container.StatusRunning
 		if err := unix.Kill(p.Pid(), 0); err != nil {
 			if err != syscall.ESRCH {
 				return nil, err
 			}
-			status = container.Status_STOPPED
+			status = container.StatusStopped
 		}
 		o.Processes = append(o.Processes, &container.Process{
 			Pid:    uint32(p.Pid()),
@@ -225,14 +225,49 @@ func (s *Service) Kill(ctx context.Context, r *shimapi.KillRequest) (*google_pro
 		}
 		return empty, nil
 	}
-	proc, ok := s.processes[int(r.Pid)]
-	if !ok {
-		return nil, fmt.Errorf("process does not exist %d", r.Pid)
-	}
-	if err := proc.Signal(int(r.Signal)); err != nil {
+
+	pids, err := s.getContainerPids(ctx, s.initProcess.id)
+	if err != nil {
 		return nil, err
 	}
+
+	valid := false
+	for _, p := range pids {
+		if r.Pid == p {
+			valid = true
+			break
+		}
+	}
+
+	if !valid {
+		return nil, errors.Errorf("process %d does not exist in container", r.Pid)
+	}
+
+	if err := unix.Kill(int(r.Pid), syscall.Signal(r.Signal)); err != nil {
+		return nil, err
+	}
+
 	return empty, nil
+}
+
+func (s *Service) Processes(ctx context.Context, r *shimapi.ProcessesRequest) (*shimapi.ProcessesResponse, error) {
+	pids, err := s.getContainerPids(ctx, r.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	ps := []*container.Process{}
+	for _, pid := range pids {
+		ps = append(ps, &container.Process{
+			Pid: pid,
+		})
+	}
+	resp := &shimapi.ProcessesResponse{
+		Processes: ps,
+	}
+
+	return resp, nil
+
 }
 
 func (s *Service) CloseStdin(ctx context.Context, r *shimapi.CloseStdinRequest) (*google_protobuf.Empty, error) {
@@ -256,4 +291,18 @@ func (s *Service) waitExit(p process, pid int, cmd *reaper.Cmd) {
 		ExitStatus: uint32(status),
 		ExitedAt:   p.ExitedAt(),
 	}
+}
+
+func (s *Service) getContainerPids(ctx context.Context, id string) ([]uint32, error) {
+	p, err := s.initProcess.runc.Ps(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	pids := make([]uint32, 0, len(p))
+	for _, pid := range p {
+		pids = append(pids, uint32(pid))
+	}
+
+	return pids, nil
 }

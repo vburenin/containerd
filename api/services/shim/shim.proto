@@ -18,6 +18,7 @@ service Shim {
 	rpc Start(StartRequest) returns (google.protobuf.Empty);
 	rpc Delete(DeleteRequest) returns (DeleteResponse);
 	rpc State(StateRequest) returns (StateResponse);
+	rpc Processes(ProcessesRequest) returns (ProcessesResponse);
 	rpc Pause(PauseRequest) returns (google.protobuf.Empty);
 	rpc Resume(ResumeRequest) returns (google.protobuf.Empty);
 
@@ -30,7 +31,7 @@ service Shim {
 }
 
 message CreateRequest {
-	string id = 1 [(gogoproto.customname) = "ID"];
+	string id = 1;
 	string bundle = 2;
 	string runtime = 3;
 	bool no_pivot = 4;
@@ -88,7 +89,7 @@ message StateRequest {
 }
 
 message StateResponse {
-	string id = 1 [(gogoproto.customname) = "ID"];
+	string id = 1;
 	string bundle = 2;
 	uint32 pid = 3;
 	containerd.v1.types.Status status = 4;
@@ -112,4 +113,12 @@ message KillRequest {
 
 message CloseStdinRequest {
 	uint32 pid = 1;
+}
+
+message ProcessesRequest {
+	string id = 1;
+}
+
+message ProcessesResponse{
+	repeated containerd.v1.types.Process processes = 1;
 }

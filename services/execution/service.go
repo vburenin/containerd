@@ -1,6 +1,7 @@
 package execution
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/containerd/containerd"
@@ -149,13 +150,13 @@ func containerFromContainerd(ctx context.Context, c plugin.Container) (*containe
 	var status container.Status
 	switch state.Status() {
 	case plugin.CreatedStatus:
-		status = container.Status_CREATED
+		status = container.StatusCreated
 	case plugin.RunningStatus:
-		status = container.Status_RUNNING
+		status = container.StatusRunning
 	case plugin.StoppedStatus:
-		status = container.Status_STOPPED
+		status = container.StatusStopped
 	case plugin.PausedStatus:
-		status = container.Status_PAUSED
+		status = container.StatusPaused
 	default:
 		log.G(ctx).WithField("status", state.Status()).Warn("unknown status")
 	}
@@ -217,10 +218,45 @@ func (s *Service) Kill(ctx context.Context, r *api.KillRequest) (*google_protobu
 	if err != nil {
 		return nil, err
 	}
-	if err := c.Kill(ctx, r.Signal, r.All); err != nil {
-		return nil, err
+
+	switch v := r.PidOrAll.(type) {
+	case *api.KillRequest_All:
+		if err := c.Kill(ctx, r.Signal, 0, true); err != nil {
+			return nil, err
+		}
+	case *api.KillRequest_Pid:
+		if err := c.Kill(ctx, r.Signal, v.Pid, false); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, fmt.Errorf("invalid option specified; expected pid or all")
 	}
 	return empty, nil
+}
+
+func (s *Service) Processes(ctx context.Context, r *api.ProcessesRequest) (*api.ProcessesResponse, error) {
+	c, err := s.getContainer(r.ID)
+	if err != nil {
+		return nil, err
+	}
+
+	pids, err := c.Processes(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	ps := []*container.Process{}
+	for _, pid := range pids {
+		ps = append(ps, &container.Process{
+			Pid: pid,
+		})
+	}
+
+	resp := &api.ProcessesResponse{
+		Processes: ps,
+	}
+
+	return resp, nil
 }
 
 func (s *Service) Events(r *api.EventsRequest, server api.ContainerService_EventsServer) error {
