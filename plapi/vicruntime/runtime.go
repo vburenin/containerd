@@ -2,6 +2,7 @@ package vicruntime
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"os"
 	"path/filepath"
@@ -14,20 +15,21 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/containers"
+	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plugin"
 	"github.com/go-openapi/swag"
-	"golang.org/x/net/context"
 )
 
 const (
-	runtimeName    = "vic-linux"
+	runtimeName    = "vic"
 	configFilename = "config.json"
 )
 
 func init() {
 	plugin.Register(runtimeName, &plugin.Registration{
-		Type: plugin.RuntimePlugin,
-		Init: New,
+		Type:   plugin.RuntimePlugin,
+		Init:   New,
+		Config: vicconfig.DefaultConfig(),
 	})
 }
 
@@ -40,18 +42,24 @@ type Runtime struct {
 	eventsCancel  func()
 }
 
+var _ plugin.Runtime = &Runtime{}
+
 func New(ic *plugin.InitContext) (interface{}, error) {
 	path := filepath.Join(ic.State, runtimeName)
 	if err := os.MkdirAll(path, 0700); err != nil {
 		return nil, err
 	}
+
+	cfg := ic.Config.(*vicconfig.Config)
+	logrus.Infof("Vic runtime config: %q", cfg)
+
 	c, cancel := context.WithCancel(ic.Context)
 	r := &Runtime{
 		root:          path,
 		events:        make(chan *containerd.Event, 2048),
 		eventsContext: c,
 		eventsCancel:  cancel,
-		pl:            PortLayerClient(),
+		pl:            PortLayerClient(cfg.PortlayerAddress),
 	}
 	ic.Monitor.Events(r.events)
 
@@ -65,7 +73,7 @@ func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts)
 		return nil, err
 	}
 
-	s, err := NewVicContainer(ctx, r.root, id, opts)
+	s, err := NewVicContainer(ctx, r.pl, r.root, id, opts)
 	if err != nil {
 		os.RemoveAll(path)
 		return nil, err
@@ -74,30 +82,29 @@ func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts)
 	return s, err
 }
 
-func (r *Runtime) Delete(ctx context.Context, c plugin.Container) (*plugin.Exit, error) {
-	return &plugin.Exit{
-		Status:    0,
-		Timestamp: time.Now(),
-	}, nil
-}
-
 func (r *Runtime) Containers(ctx context.Context) ([]plugin.Container, error) {
 
 	var o []plugin.Container
 
-	pl := PortLayerClient()
 	params := containers.NewGetContainerListParams().WithAll(swag.Bool(true))
 
-	cl, err := pl.Containers.GetContainerList(params)
+	cl, err := r.pl.Containers.GetContainerList(params)
 	if err != nil {
 		return nil, err
 	}
 
 	for _, c := range cl.Payload {
-		o = append(o, RestoreVicContaner(ctx, r.root, c))
+		o = append(o, RestoreVicContaner(ctx, r.pl, r.root, c))
 	}
 
 	return o, nil
+}
+
+func (r *Runtime) Delete(ctx context.Context, c plugin.Container) (*plugin.Exit, error) {
+	return &plugin.Exit{
+		Status:    0,
+		Timestamp: time.Now(),
+	}, nil
 }
 
 func (r *Runtime) Events(ctx context.Context) <-chan *containerd.Event {

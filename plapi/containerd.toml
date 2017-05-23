@@ -1,0 +1,4 @@
+snapshotter="vic"
+[plugins]
+  [vic]
+  portlayer_address="127.0.0.1:2377"
