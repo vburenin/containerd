@@ -2,14 +2,16 @@ package plugin
 
 import "context"
 
-type ContainerInfo struct {
-	ID      string
-	Runtime string
+type TaskInfo struct {
+	ID          string
+	ContainerID string
+	Runtime     string
+	Spec        []byte
 }
 
-type Container interface {
+type Task interface {
 	// Information of the container
-	Info() ContainerInfo
+	Info() TaskInfo
 	// Start the container's user defined process
 	Start(context.Context) error
 	// State returns the container's state
@@ -28,6 +30,18 @@ type Container interface {
 	Pty(context.Context, uint32, ConsoleSize) error
 	// CloseStdin closes the processes stdin
 	CloseStdin(context.Context, uint32) error
+	// Checkpoint checkpoints a container to an image with live system data
+	Checkpoint(context.Context, CheckpointOpts) error
+}
+
+type CheckpointOpts struct {
+	Exit             bool
+	AllowTCP         bool
+	AllowUnixSockets bool
+	AllowTerminal    bool
+	FileLocks        bool
+	EmptyNamespaces  []string
+	Path             string
 }
 
 type ExecOpts struct {

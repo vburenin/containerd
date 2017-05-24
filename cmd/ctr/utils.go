@@ -2,6 +2,7 @@ package main
 
 import (
 	gocontext "context"
+	"encoding/csv"
 	"fmt"
 	"io/ioutil"
 	"os"
@@ -12,13 +13,14 @@ import (
 	"syscall"
 
 	"github.com/Sirupsen/logrus"
+	containersapi "github.com/containerd/containerd/api/services/containers"
 	contentapi "github.com/containerd/containerd/api/services/content"
 	diffapi "github.com/containerd/containerd/api/services/diff"
 	"github.com/containerd/containerd/api/services/execution"
 	imagesapi "github.com/containerd/containerd/api/services/images"
 	snapshotapi "github.com/containerd/containerd/api/services/snapshot"
 	versionservice "github.com/containerd/containerd/api/services/version"
-	"github.com/containerd/containerd/api/types/container"
+	"github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
 	contentservice "github.com/containerd/containerd/services/content"
@@ -26,18 +28,27 @@ import (
 	imagesservice "github.com/containerd/containerd/services/images"
 	snapshotservice "github.com/containerd/containerd/services/snapshot"
 	"github.com/containerd/containerd/snapshot"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/urfave/cli"
 	"google.golang.org/grpc"
 )
 
 var grpcConn *grpc.ClientConn
 
-func getExecutionService(context *cli.Context) (execution.ContainerServiceClient, error) {
+func getContainersService(context *cli.Context) (containersapi.ContainersClient, error) {
 	conn, err := getGRPCConnection(context)
 	if err != nil {
 		return nil, err
 	}
-	return execution.NewContainerServiceClient(conn), nil
+	return containersapi.NewContainersClient(conn), nil
+}
+
+func getTasksService(context *cli.Context) (execution.TasksClient, error) {
+	conn, err := getGRPCConnection(context)
+	if err != nil {
+		return nil, err
+	}
+	return execution.NewTasksClient(conn), nil
 }
 
 func getContentStore(context *cli.Context) (content.Store, error) {
@@ -92,13 +103,13 @@ func getTempDir(id string) (string, error) {
 	return tmpDir, nil
 }
 
-func waitContainer(events execution.ContainerService_EventsClient, id string, pid uint32) (uint32, error) {
+func waitContainer(events execution.Tasks_EventsClient, id string, pid uint32) (uint32, error) {
 	for {
 		e, err := events.Recv()
 		if err != nil {
 			return 255, err
 		}
-		if e.Type != container.Event_EXIT {
+		if e.Type != task.Event_EXIT {
 			continue
 		}
 		if e.ID == id && e.Pid == pid {
@@ -107,7 +118,7 @@ func waitContainer(events execution.ContainerService_EventsClient, id string, pi
 	}
 }
 
-func forwardAllSignals(containers execution.ContainerServiceClient, id string) chan os.Signal {
+func forwardAllSignals(containers execution.TasksClient, id string) chan os.Signal {
 	sigc := make(chan os.Signal, 128)
 	signal.Notify(sigc)
 
@@ -115,8 +126,8 @@ func forwardAllSignals(containers execution.ContainerServiceClient, id string) c
 		for s := range sigc {
 			logrus.Debug("Forwarding signal ", s)
 			killRequest := &execution.KillRequest{
-				ID:     id,
-				Signal: uint32(s.(syscall.Signal)),
+				ContainerID: id,
+				Signal:      uint32(s.(syscall.Signal)),
 				PidOrAll: &execution.KillRequest_All{
 					All: false,
 				},
@@ -151,4 +162,39 @@ func parseSignal(rawSignal string) (syscall.Signal, error) {
 func stopCatch(sigc chan os.Signal) {
 	signal.Stop(sigc)
 	close(sigc)
+}
+
+// parseMountFlag parses a mount string in the form "type=foo,source=/path,destination=/target,options=rbind:rw"
+func parseMountFlag(m string) (specs.Mount, error) {
+	mount := specs.Mount{}
+	r := csv.NewReader(strings.NewReader(m))
+
+	fields, err := r.Read()
+	if err != nil {
+		return mount, err
+	}
+
+	for _, field := range fields {
+		v := strings.Split(field, "=")
+		if len(v) != 2 {
+			return mount, fmt.Errorf("invalid mount specification: expected key=val")
+		}
+
+		key := v[0]
+		val := v[1]
+		switch key {
+		case "type":
+			mount.Type = val
+		case "source", "src":
+			mount.Source = val
+		case "destination", "dst":
+			mount.Destination = val
+		case "options":
+			mount.Options = strings.Split(val, ":")
+		default:
+			return mount, fmt.Errorf("mount option %q not supported", key)
+		}
+	}
+
+	return mount, nil
 }

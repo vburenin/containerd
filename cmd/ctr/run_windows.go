@@ -10,8 +10,10 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/containerd/console"
+	containersapi "github.com/containerd/containerd/api/services/containers"
 	"github.com/containerd/containerd/api/services/execution"
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/windows"
 	"github.com/containerd/containerd/windows/hcs"
 	protobuf "github.com/gogo/protobuf/types"
@@ -116,12 +118,15 @@ func getConfig(context *cli.Context, imageConfig *ocispec.ImageConfig, rootfs st
 	return s, nil
 }
 
-func newCreateRequest(context *cli.Context, imageConfig *ocispec.ImageConfig, id, tmpDir, rootfs string) (*execution.CreateRequest, error) {
-	spec, err := getConfig(context, imageConfig, rootfs)
+func newContainerSpec(context *cli.Context, config *ocispec.ImageConfig, imageRef string) ([]byte, error) {
+	spec, err := getConfig(context, config, context.String("rootfs"))
 	if err != nil {
 		return nil, err
 	}
-
+	if spec.Annotations == nil {
+		spec.Annotations = make(map[string]string)
+	}
+	spec.Annotations["image"] = imageRef
 	rtSpec := windows.RuntimeSpec{
 		OCISpec: *spec,
 		Configuration: hcs.Configuration{
@@ -129,30 +134,39 @@ func newCreateRequest(context *cli.Context, imageConfig *ocispec.ImageConfig, id
 			IgnoreFlushesDuringBoot:  true,
 			AllowUnqualifiedDNSQuery: true},
 	}
+	return json.Marshal(rtSpec)
+}
 
-	data, err := json.Marshal(rtSpec)
-	if err != nil {
-		return nil, err
-	}
-	create := &execution.CreateRequest{
-		ID: id,
-		Spec: &protobuf.Any{
-			TypeUrl: specs.Version,
-			Value:   data,
+func newCreateContainerRequest(context *cli.Context, id, snapshot string, spec []byte) (*containersapi.CreateContainerRequest, error) {
+	create := &containersapi.CreateContainerRequest{
+		Container: containersapi.Container{
+			ID: id,
+			Spec: &protobuf.Any{
+				TypeUrl: specs.Version,
+				Value:   spec,
+			},
+			Runtime: context.String("runtime"),
+			RootFS:  snapshot,
 		},
-		Runtime:  context.String("runtime"),
-		Terminal: context.Bool("tty"),
-		Stdin:    fmt.Sprintf(`%s\ctr-%s-stdin`, pipeRoot, id),
-		Stdout:   fmt.Sprintf(`%s\ctr-%s-stdout`, pipeRoot, id),
-	}
-	if !create.Terminal {
-		create.Stderr = fmt.Sprintf(`%s\ctr-%s-stderr`, pipeRoot, id)
 	}
 
 	return create, nil
 }
 
-func handleConsoleResize(ctx context.Context, service execution.ContainerServiceClient, id string, pid uint32, con console.Console) error {
+func newCreateTaskRequest(context *cli.Context, id, tmpDir string, checkpoint *ocispec.Descriptor, mounts []mount.Mount) (*execution.CreateRequest, error) {
+	create := &execution.CreateRequest{
+		ContainerID: id,
+		Terminal:    context.Bool("tty"),
+		Stdin:       fmt.Sprintf(`%s\ctr-%s-stdin`, pipeRoot, id),
+		Stdout:      fmt.Sprintf(`%s\ctr-%s-stdout`, pipeRoot, id),
+	}
+	if !create.Terminal {
+		create.Stderr = fmt.Sprintf(`%s\ctr-%s-stderr`, pipeRoot, id)
+	}
+	return create, nil
+}
+
+func handleConsoleResize(ctx context.Context, service execution.TasksClient, id string, pid uint32, con console.Console) error {
 	// do an initial resize of the console
 	size, err := con.Size()
 	if err != nil {
@@ -171,10 +185,10 @@ func handleConsoleResize(ctx context.Context, service execution.ContainerService
 
 			if size.Width != prevSize.Width || size.Height != prevSize.Height {
 				if _, err := service.Pty(ctx, &execution.PtyRequest{
-					ID:     id,
-					Pid:    pid,
-					Width:  uint32(size.Width),
-					Height: uint32(size.Height),
+					ContainerID: id,
+					Pid:         pid,
+					Width:       uint32(size.Width),
+					Height:      uint32(size.Height),
 				}); err != nil {
 					log.G(ctx).WithError(err).Error("resize pty")
 				}

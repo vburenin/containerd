@@ -1,26 +1,40 @@
 package execution
 
 import (
+	"bytes"
 	"fmt"
+	"io"
+	"io/ioutil"
+	"os"
+	"path/filepath"
 	"sync"
 
-	"github.com/containerd/containerd"
+	"github.com/boltdb/bolt"
 	api "github.com/containerd/containerd/api/services/execution"
-	"github.com/containerd/containerd/api/types/container"
+	"github.com/containerd/containerd/api/types/descriptor"
+	"github.com/containerd/containerd/api/types/task"
+	"github.com/containerd/containerd/archive"
+	"github.com/containerd/containerd/containers"
+	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/plugin"
+	protobuf "github.com/gogo/protobuf/types"
 	google_protobuf "github.com/golang/protobuf/ptypes/empty"
+	specs "github.com/opencontainers/image-spec/specs-go"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 )
 
 var (
-	_     = (api.ContainerServiceServer)(&Service{})
+	_     = (api.TasksServer)(&Service{})
 	empty = &google_protobuf.Empty{}
 )
 
 func init() {
-	plugin.Register("runtime-grpc", &plugin.Registration{
+	plugin.Register("tasks-grpc", &plugin.Registration{
 		Type: plugin.GRPCPlugin,
 		Init: New,
 	})
@@ -32,84 +46,129 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 		return nil, err
 	}
 	return &Service{
-		runtimes:   ic.Runtimes,
-		containers: make(map[string]plugin.Container),
-		collector:  c,
+		runtimes:  ic.Runtimes,
+		tasks:     make(map[string]plugin.Task),
+		db:        ic.Meta,
+		collector: c,
+		store:     ic.Content,
 	}, nil
 }
 
 type Service struct {
 	mu sync.Mutex
 
-	runtimes   map[string]plugin.Runtime
-	containers map[string]plugin.Container
-	collector  *collector
+	runtimes  map[string]plugin.Runtime
+	tasks     map[string]plugin.Task
+	db        *bolt.DB
+	collector *collector
+	store     content.Store
 }
 
 func (s *Service) Register(server *grpc.Server) error {
-	api.RegisterContainerServiceServer(server, s)
-	// load all containers
+	api.RegisterTasksServer(server, s)
+	// load all tasks
 	for _, r := range s.runtimes {
-		containers, err := r.Containers(context.Background())
+		tasks, err := r.Tasks(context.Background())
 		if err != nil {
 			return err
 		}
-		for _, c := range containers {
-			s.containers[c.Info().ID] = c
+		for _, c := range tasks {
+			s.tasks[c.Info().ContainerID] = c
 		}
 	}
 	return nil
 }
 
 func (s *Service) Create(ctx context.Context, r *api.CreateRequest) (*api.CreateResponse, error) {
+	var (
+		checkpointPath string
+		err            error
+	)
+	if r.Checkpoint != nil {
+		checkpointPath, err = ioutil.TempDir("", "ctrd-checkpoint")
+		if err != nil {
+			return nil, err
+		}
+		if r.Checkpoint.MediaType != images.MediaTypeContainerd1Checkpoint {
+			return nil, fmt.Errorf("unsupported checkpoint type %q", r.Checkpoint.MediaType)
+		}
+		reader, err := s.store.Reader(ctx, r.Checkpoint.Digest)
+		if err != nil {
+			return nil, err
+		}
+		_, err = archive.Apply(ctx, checkpointPath, reader)
+		reader.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var container containers.Container
+	if err := s.db.View(func(tx *bolt.Tx) error {
+		store := containers.NewStore(tx)
+		var err error
+		container, err = store.Get(ctx, r.ContainerID)
+		return err
+	}); err != nil {
+		switch {
+		case containers.IsNotFound(err):
+			return nil, grpc.Errorf(codes.NotFound, "container %v not found", r.ContainerID)
+		case containers.IsExists(err):
+			return nil, grpc.Errorf(codes.AlreadyExists, "container %v already exists", r.ContainerID)
+		}
+
+		return nil, err
+	}
+
 	opts := plugin.CreateOpts{
-		Spec: r.Spec.Value,
+		Spec: container.Spec,
 		IO: plugin.IO{
 			Stdin:    r.Stdin,
 			Stdout:   r.Stdout,
 			Stderr:   r.Stderr,
 			Terminal: r.Terminal,
 		},
+		Checkpoint: checkpointPath,
 	}
 	for _, m := range r.Rootfs {
-		opts.Rootfs = append(opts.Rootfs, containerd.Mount{
+		opts.Rootfs = append(opts.Rootfs, mount.Mount{
 			Type:    m.Type,
 			Source:  m.Source,
 			Options: m.Options,
 		})
 	}
-	runtime, err := s.getRuntime(r.Runtime)
+	runtime, err := s.getRuntime(container.Runtime)
 	if err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	if _, ok := s.containers[r.ID]; ok {
+	if _, ok := s.tasks[r.ContainerID]; ok {
 		s.mu.Unlock()
-		return nil, plugin.ErrContainerExists
+		return nil, grpc.Errorf(codes.AlreadyExists, "task %v already exists", r.ContainerID)
 	}
-	c, err := runtime.Create(ctx, r.ID, opts)
+	c, err := runtime.Create(ctx, r.ContainerID, opts)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
-	s.containers[r.ID] = c
+	s.tasks[r.ContainerID] = c
 	s.mu.Unlock()
 	state, err := c.State(ctx)
 	if err != nil {
 		s.mu.Lock()
-		delete(s.containers, r.ID)
+		delete(s.tasks, r.ContainerID)
 		runtime.Delete(ctx, c)
 		s.mu.Unlock()
 		return nil, err
 	}
 	return &api.CreateResponse{
-		ID:  r.ID,
-		Pid: state.Pid(),
+		ContainerID: r.ContainerID,
+		Pid:         state.Pid(),
 	}, nil
 }
 
 func (s *Service) Start(ctx context.Context, r *api.StartRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getContainer(r.ID)
+	c, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +179,7 @@ func (s *Service) Start(ctx context.Context, r *api.StartRequest) (*google_proto
 }
 
 func (s *Service) Delete(ctx context.Context, r *api.DeleteRequest) (*api.DeleteResponse, error) {
-	c, err := s.getContainer(r.ID)
+	c, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +192,7 @@ func (s *Service) Delete(ctx context.Context, r *api.DeleteRequest) (*api.Delete
 		return nil, err
 	}
 
-	delete(s.containers, r.ID)
+	delete(s.tasks, r.ContainerID)
 
 	return &api.DeleteResponse{
 		ExitStatus: exit.Status,
@@ -141,56 +200,66 @@ func (s *Service) Delete(ctx context.Context, r *api.DeleteRequest) (*api.Delete
 	}, nil
 }
 
-func containerFromContainerd(ctx context.Context, c plugin.Container) (*container.Container, error) {
+func taskFromContainerd(ctx context.Context, c plugin.Task) (*task.Task, error) {
 	state, err := c.State(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	var status container.Status
+	var status task.Status
 	switch state.Status() {
 	case plugin.CreatedStatus:
-		status = container.StatusCreated
+		status = task.StatusCreated
 	case plugin.RunningStatus:
-		status = container.StatusRunning
+		status = task.StatusRunning
 	case plugin.StoppedStatus:
-		status = container.StatusStopped
+		status = task.StatusStopped
 	case plugin.PausedStatus:
-		status = container.StatusPaused
+		status = task.StatusPaused
 	default:
 		log.G(ctx).WithField("status", state.Status()).Warn("unknown status")
 	}
-	return &container.Container{
+	return &task.Task{
 		ID:     c.Info().ID,
 		Pid:    state.Pid(),
 		Status: status,
+		Spec: &protobuf.Any{
+			TypeUrl: specs.Version,
+			Value:   c.Info().Spec,
+		},
 	}, nil
 }
 
-func (s *Service) Info(ctx context.Context, r *api.InfoRequest) (*container.Container, error) {
-	c, err := s.getContainer(r.ID)
+func (s *Service) Info(ctx context.Context, r *api.InfoRequest) (*api.InfoResponse, error) {
+	task, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
-	return containerFromContainerd(ctx, c)
+	t, err := taskFromContainerd(ctx, task)
+	if err != nil {
+		return nil, err
+	}
+	return &api.InfoResponse{
+		Task: t,
+	}, nil
 }
 
 func (s *Service) List(ctx context.Context, r *api.ListRequest) (*api.ListResponse, error) {
 	resp := &api.ListResponse{}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, cd := range s.containers {
-		c, err := containerFromContainerd(ctx, cd)
+	for _, cd := range s.tasks {
+		c, err := taskFromContainerd(ctx, cd)
 		if err != nil {
 			return nil, err
 		}
-		resp.Containers = append(resp.Containers, c)
+		resp.Tasks = append(resp.Tasks, c)
 	}
 	return resp, nil
 }
 
 func (s *Service) Pause(ctx context.Context, r *api.PauseRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getContainer(r.ID)
+	c, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +271,7 @@ func (s *Service) Pause(ctx context.Context, r *api.PauseRequest) (*google_proto
 }
 
 func (s *Service) Resume(ctx context.Context, r *api.ResumeRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getContainer(r.ID)
+	c, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +283,7 @@ func (s *Service) Resume(ctx context.Context, r *api.ResumeRequest) (*google_pro
 }
 
 func (s *Service) Kill(ctx context.Context, r *api.KillRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getContainer(r.ID)
+	c, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +304,7 @@ func (s *Service) Kill(ctx context.Context, r *api.KillRequest) (*google_protobu
 }
 
 func (s *Service) Processes(ctx context.Context, r *api.ProcessesRequest) (*api.ProcessesResponse, error) {
-	c, err := s.getContainer(r.ID)
+	c, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -245,9 +314,9 @@ func (s *Service) Processes(ctx context.Context, r *api.ProcessesRequest) (*api.
 		return nil, err
 	}
 
-	ps := []*container.Process{}
+	ps := []*task.Process{}
 	for _, pid := range pids {
-		ps = append(ps, &container.Process{
+		ps = append(ps, &task.Process{
 			Pid: pid,
 		})
 	}
@@ -259,7 +328,7 @@ func (s *Service) Processes(ctx context.Context, r *api.ProcessesRequest) (*api.
 	return resp, nil
 }
 
-func (s *Service) Events(r *api.EventsRequest, server api.ContainerService_EventsServer) error {
+func (s *Service) Events(r *api.EventsRequest, server api.Tasks_EventsServer) error {
 	w := &grpcEventWriter{
 		server: server,
 	}
@@ -267,7 +336,7 @@ func (s *Service) Events(r *api.EventsRequest, server api.ContainerService_Event
 }
 
 func (s *Service) Exec(ctx context.Context, r *api.ExecRequest) (*api.ExecResponse, error) {
-	c, err := s.getContainer(r.ID)
+	c, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +362,7 @@ func (s *Service) Exec(ctx context.Context, r *api.ExecRequest) (*api.ExecRespon
 }
 
 func (s *Service) Pty(ctx context.Context, r *api.PtyRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getContainer(r.ID)
+	c, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -307,7 +376,7 @@ func (s *Service) Pty(ctx context.Context, r *api.PtyRequest) (*google_protobuf.
 }
 
 func (s *Service) CloseStdin(ctx context.Context, r *api.CloseStdinRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getContainer(r.ID)
+	c, err := s.getTask(r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -317,12 +386,78 @@ func (s *Service) CloseStdin(ctx context.Context, r *api.CloseStdinRequest) (*go
 	return empty, nil
 }
 
-func (s *Service) getContainer(id string) (plugin.Container, error) {
+func (s *Service) Checkpoint(ctx context.Context, r *api.CheckpointRequest) (*api.CheckpointResponse, error) {
+	c, err := s.getTask(r.ContainerID)
+	if err != nil {
+		return nil, err
+	}
+	image, err := ioutil.TempDir("", "ctd-checkpoint")
+	if err != nil {
+		return nil, err
+	}
+	defer os.RemoveAll(image)
+	if err := c.Checkpoint(ctx, plugin.CheckpointOpts{
+		Exit:             r.Exit,
+		AllowTCP:         r.AllowTcp,
+		AllowTerminal:    r.AllowTerminal,
+		AllowUnixSockets: r.AllowUnixSockets,
+		FileLocks:        r.FileLocks,
+		// ParentImage: r.ParentImage,
+		EmptyNamespaces: r.EmptyNamespaces,
+		Path:            image,
+	}); err != nil {
+		return nil, err
+	}
+	// write checkpoint to the content store
+	tar := archive.Diff(ctx, "", image)
+	cp, err := s.writeContent(ctx, images.MediaTypeContainerd1Checkpoint, image, tar)
+	// close tar first after write
+	if err := tar.Close(); err != nil {
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	// write the config to the content store
+	spec := bytes.NewReader(c.Info().Spec)
+	specD, err := s.writeContent(ctx, images.MediaTypeContainerd1CheckpointConfig, filepath.Join(image, "spec"), spec)
+	if err != nil {
+		return nil, err
+	}
+	return &api.CheckpointResponse{
+		Descriptors: []*descriptor.Descriptor{
+			cp,
+			specD,
+		},
+	}, nil
+}
+
+func (s *Service) writeContent(ctx context.Context, mediaType, ref string, r io.Reader) (*descriptor.Descriptor, error) {
+	writer, err := s.store.Writer(ctx, ref, 0, "")
+	if err != nil {
+		return nil, err
+	}
+	defer writer.Close()
+	size, err := io.Copy(writer, r)
+	if err != nil {
+		return nil, err
+	}
+	if err := writer.Commit(0, ""); err != nil {
+		return nil, err
+	}
+	return &descriptor.Descriptor{
+		MediaType: mediaType,
+		Digest:    writer.Digest(),
+		Size_:     size,
+	}, nil
+}
+
+func (s *Service) getTask(id string) (plugin.Task, error) {
 	s.mu.Lock()
-	c, ok := s.containers[id]
+	c, ok := s.tasks[id]
 	s.mu.Unlock()
 	if !ok {
-		return nil, plugin.ErrContainerNotExist
+		return nil, grpc.Errorf(codes.NotFound, "task %v not found", id)
 	}
 	return c, nil
 }
@@ -336,26 +471,26 @@ func (s *Service) getRuntime(name string) (plugin.Runtime, error) {
 }
 
 type grpcEventWriter struct {
-	server api.ContainerService_EventsServer
+	server api.Tasks_EventsServer
 }
 
-func (g *grpcEventWriter) Write(e *containerd.Event) error {
-	var t container.Event_EventType
+func (g *grpcEventWriter) Write(e *plugin.Event) error {
+	var t task.Event_EventType
 	switch e.Type {
-	case containerd.ExitEvent:
-		t = container.Event_EXIT
-	case containerd.ExecAddEvent:
-		t = container.Event_EXEC_ADDED
-	case containerd.PausedEvent:
-		t = container.Event_PAUSED
-	case containerd.CreateEvent:
-		t = container.Event_CREATE
-	case containerd.StartEvent:
-		t = container.Event_START
-	case containerd.OOMEvent:
-		t = container.Event_OOM
+	case plugin.ExitEvent:
+		t = task.Event_EXIT
+	case plugin.ExecAddEvent:
+		t = task.Event_EXEC_ADDED
+	case plugin.PausedEvent:
+		t = task.Event_PAUSED
+	case plugin.CreateEvent:
+		t = task.Event_CREATE
+	case plugin.StartEvent:
+		t = task.Event_START
+	case plugin.OOMEvent:
+		t = task.Event_OOM
 	}
-	return g.server.Send(&container.Event{
+	return g.server.Send(&task.Event{
 		Type:       t,
 		ID:         e.ID,
 		Pid:        e.Pid,
