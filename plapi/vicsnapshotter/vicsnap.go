@@ -6,9 +6,9 @@ import (
 	"sync"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plapi/vicruntime"
@@ -40,7 +40,7 @@ type VicSnap struct {
 	plClient       *client.PortLayer
 	snapshots      map[string]snapshot.Info
 	parentChildMap map[string][]string
-	active         map[string][]containerd.Mount
+	active         map[string][]mount.Mount
 	mounts         map[string]*VicMount
 	store          content.Store
 
@@ -54,7 +54,7 @@ func NewVicSnap(ic *plugin.InitContext) *VicSnap {
 		plClient:       vicruntime.PortLayerClient(cfg.PortlayerAddress),
 		snapshots:      make(map[string]snapshot.Info),
 		parentChildMap: make(map[string][]string),
-		active:         make(map[string][]containerd.Mount),
+		active:         make(map[string][]mount.Mount),
 		mounts:         make(map[string]*VicMount),
 	}
 	return vs
@@ -83,7 +83,7 @@ func (vs *VicSnap) Usage(ctx context.Context, key string) (snapshot.Usage, error
 	}, nil
 }
 
-func (vs *VicSnap) Mounts(ctx context.Context, key string) ([]containerd.Mount, error) {
+func (vs *VicSnap) Mounts(ctx context.Context, key string) ([]mount.Mount, error) {
 	vs.mu.Lock()
 	vs.mu.Unlock()
 	si, ok := vs.snapshots[key]
@@ -101,7 +101,7 @@ func (vs *VicSnap) Mounts(ctx context.Context, key string) ([]containerd.Mount, 
 	return mounts, nil
 }
 
-func (vs *VicSnap) prepareSnapshot(snapType, key, parent string) ([]containerd.Mount, error) {
+func (vs *VicSnap) prepareSnapshot(snapType, key, parent string) ([]mount.Mount, error) {
 	logrus.Debugf("Preparing snapshot %s:%s/%s", snapType, parent, key)
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
@@ -118,7 +118,7 @@ func (vs *VicSnap) prepareSnapshot(snapType, key, parent string) ([]containerd.M
 		parent = "scratch"
 	}
 
-	m := containerd.Mount{
+	m := mount.Mount{
 		Options: []string{"rw"},
 		Type:    "ext4",
 		Source:  fmt.Sprintf("%s/%s/%s", snapType, parent, key),
@@ -131,17 +131,17 @@ func (vs *VicSnap) prepareSnapshot(snapType, key, parent string) ([]containerd.M
 		Readonly: snapType == "view",
 	}
 
-	mountList := []containerd.Mount{m}
+	mountList := []mount.Mount{m}
 	vs.active[key] = mountList
 
 	return mountList, nil
 }
 
-func (vs *VicSnap) Prepare(ctx context.Context, key, parent string) ([]containerd.Mount, error) {
+func (vs *VicSnap) Prepare(ctx context.Context, key, parent string) ([]mount.Mount, error) {
 	return vs.prepareSnapshot("img", key, parent)
 }
 
-func (vs *VicSnap) View(ctx context.Context, key, parent string) ([]containerd.Mount, error) {
+func (vs *VicSnap) View(ctx context.Context, key, parent string) ([]mount.Mount, error) {
 	return vs.prepareSnapshot("view", key, parent)
 }
 

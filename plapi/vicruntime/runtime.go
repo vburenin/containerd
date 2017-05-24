@@ -9,9 +9,8 @@ import (
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/api/services/shim"
-	"github.com/containerd/containerd/api/types/container"
+	"github.com/containerd/containerd/api/types/task"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/containers"
@@ -36,7 +35,7 @@ func init() {
 type Runtime struct {
 	root string
 
-	events        chan *containerd.Event
+	events        chan *plugin.Event
 	pl            *client.PortLayer
 	eventsContext context.Context
 	eventsCancel  func()
@@ -56,7 +55,7 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 	c, cancel := context.WithCancel(ic.Context)
 	r := &Runtime{
 		root:          path,
-		events:        make(chan *containerd.Event, 2048),
+		events:        make(chan *plugin.Event, 2048),
 		eventsContext: c,
 		eventsCancel:  cancel,
 		pl:            PortLayerClient(cfg.PortlayerAddress),
@@ -66,7 +65,7 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 	return r, nil
 }
 
-func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts) (plugin.Container, error) {
+func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts) (plugin.Task, error) {
 	logrus.Debugf("Starting runtime for %s. Options: %q", id, opts)
 	path, err := r.newBundle(id, opts.Spec)
 	if err != nil {
@@ -82,9 +81,9 @@ func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts)
 	return s, err
 }
 
-func (r *Runtime) Containers(ctx context.Context) ([]plugin.Container, error) {
+func (r *Runtime) Tasks(ctx context.Context) ([]plugin.Task, error) {
 
-	var o []plugin.Container
+	var o []plugin.Task
 
 	params := containers.NewGetContainerListParams().WithAll(swag.Bool(true))
 
@@ -100,14 +99,14 @@ func (r *Runtime) Containers(ctx context.Context) ([]plugin.Container, error) {
 	return o, nil
 }
 
-func (r *Runtime) Delete(ctx context.Context, c plugin.Container) (*plugin.Exit, error) {
+func (r *Runtime) Delete(ctx context.Context, c plugin.Task) (*plugin.Exit, error) {
 	return &plugin.Exit{
 		Status:    0,
 		Timestamp: time.Now(),
 	}, nil
 }
 
-func (r *Runtime) Events(ctx context.Context) <-chan *containerd.Event {
+func (r *Runtime) Events(ctx context.Context) <-chan *plugin.Event {
 	return r.events
 }
 
@@ -118,20 +117,20 @@ func (r *Runtime) forward(events shim.Shim_EventsClient) {
 			log.G(r.eventsContext).WithError(err).Error("get event from shim")
 			return
 		}
-		var et containerd.EventType
+		var et plugin.EventType
 		switch e.Type {
-		case container.Event_CREATE:
-			et = containerd.CreateEvent
-		case container.Event_EXEC_ADDED:
-			et = containerd.ExecAddEvent
-		case container.Event_EXIT:
-			et = containerd.ExitEvent
-		case container.Event_OOM:
-			et = containerd.OOMEvent
-		case container.Event_START:
-			et = containerd.StartEvent
+		case task.Event_CREATE:
+			et = plugin.CreateEvent
+		case task.Event_EXEC_ADDED:
+			et = plugin.ExecAddEvent
+		case task.Event_EXIT:
+			et = plugin.ExitEvent
+		case task.Event_OOM:
+			et = plugin.OOMEvent
+		case task.Event_START:
+			et = plugin.StartEvent
 		}
-		r.events <- &containerd.Event{
+		r.events <- &plugin.Event{
 			Timestamp:  time.Now(),
 			Runtime:    runtimeName,
 			Type:       et,

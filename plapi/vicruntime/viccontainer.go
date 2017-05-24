@@ -9,7 +9,6 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/containerd/console"
-	"github.com/containerd/containerd/api/types/container"
 	"github.com/containerd/containerd/api/types/mount"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/containers"
@@ -49,7 +48,7 @@ type CommData struct {
 	pid    int32
 }
 
-type VicContainer struct {
+type VicTask struct {
 	client   *client.PortLayer
 	bundle   string
 	storage  string
@@ -63,7 +62,7 @@ type VicContainer struct {
 	statusMu sync.Mutex
 
 	server *grpc.Server
-	events chan *container.Event
+	events chan *plugin.Event
 
 	mounts      []*mount.Mount
 	id          string
@@ -80,9 +79,9 @@ const (
 )
 
 func NewVicContainer(ctx context.Context, portLayer *client.PortLayer,
-	root, id string, opts plugin.CreateOpts) (plugin.Container, error) {
+	root, id string, opts plugin.CreateOpts) (plugin.Task, error) {
 
-	c := &VicContainer{}
+	c := &VicTask{}
 	c.bundle = filepath.Join(root, id)
 	c.id = id
 	c.initProc.stdin = opts.IO.Stdin
@@ -204,8 +203,11 @@ Mar  9 2017 10:37:00.655Z INFO  Create params. Name: %!s(*string=<nil>): {
 	return c, nil
 }
 
-func RestoreVicContaner(ctx context.Context, portlayer *client.PortLayer, root string, ci *models.ContainerInfo) plugin.Container {
-	c := &VicContainer{}
+func RestoreVicContaner(ctx context.Context, portlayer *client.PortLayer,
+	root string, ci *models.ContainerInfo) plugin.Task {
+
+	c := &VicTask{}
+	c.root = root
 	c.client = portlayer
 	c.initProc = &CommData{}
 
@@ -230,7 +232,7 @@ func RestoreVicContaner(ctx context.Context, portlayer *client.PortLayer, root s
 	return c
 }
 
-func (p *VicContainer) getHandle(ctx context.Context) (string, error) {
+func (p *VicTask) getHandle(ctx context.Context) (string, error) {
 	r, err := p.client.Containers.Get(containers.NewGetParamsWithContext(ctx).WithID(p.portLayerId))
 	if err != nil {
 		logrus.Warningf("Could not get handle for container: %s", err)
@@ -240,7 +242,7 @@ func (p *VicContainer) getHandle(ctx context.Context) (string, error) {
 	return r.Payload, nil
 }
 
-func (p *VicContainer) commitHandle(ctx context.Context, h string) error {
+func (p *VicTask) commitHandle(ctx context.Context, h string) error {
 	logrus.Debugf("Commiting handle: %s", h)
 
 	commitParams := containers.NewCommitParamsWithContext(ctx).WithHandle(h).WithWaitTime(swag.Int32(5))
@@ -251,7 +253,7 @@ func (p *VicContainer) commitHandle(ctx context.Context, h string) error {
 	return err
 }
 
-func (p *VicContainer) runIOServers(ctx context.Context) error {
+func (p *VicTask) runIOServers(ctx context.Context) error {
 	var socket *runc.Socket
 	var err error
 
@@ -287,14 +289,16 @@ func (p *VicContainer) runIOServers(ctx context.Context) error {
 	return nil
 }
 
-func (p *VicContainer) Info() plugin.ContainerInfo {
-	return plugin.ContainerInfo{
-		ID:      p.id,
-		Runtime: VicRuntimeName,
+func (p *VicTask) Info() plugin.TaskInfo {
+	return plugin.TaskInfo{
+		ID:          p.id,
+		ContainerID: p.id,
+		Runtime:     VicRuntimeName,
+		Spec:        nil,
 	}
 }
 
-func (p *VicContainer) Start(ctx context.Context) error {
+func (p *VicTask) Start(ctx context.Context) error {
 	h, err := p.getHandle(ctx)
 	if err != nil {
 		return fmt.Errorf("Container not found: %s", p.id)
@@ -311,7 +315,7 @@ func (p *VicContainer) Start(ctx context.Context) error {
 	return p.commitHandle(ctx, h)
 }
 
-func (p *VicContainer) State(ctx context.Context) (plugin.State, error) {
+func (p *VicTask) State(ctx context.Context) (plugin.State, error) {
 	p.statusMu.Lock()
 	defer p.statusMu.Unlock()
 
@@ -343,30 +347,34 @@ func (p *VicContainer) State(ctx context.Context) (plugin.State, error) {
 	}, nil
 }
 
-func (p *VicContainer) Pause(ctx context.Context) error {
+func (p *VicTask) Pause(ctx context.Context) error {
 	return nil
 }
 
-func (p *VicContainer) Resume(ctx context.Context) error {
+func (p *VicTask) Resume(ctx context.Context) error {
 	return nil
 }
 
-func (p *VicContainer) Kill(ctx context.Context, signal, pid uint32, b bool) error {
+func (p *VicTask) Kill(ctx context.Context, signal, pid uint32, b bool) error {
 	return nil
 }
 
-func (p *VicContainer) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Process, error) {
+func (p *VicTask) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Process, error) {
 	return nil, fmt.Errorf("Exec is not implemented")
 }
 
-func (p *VicContainer) Processes(ctx context.Context) ([]uint32, error) {
+func (p *VicTask) Processes(ctx context.Context) ([]uint32, error) {
 	return []uint32{1}, nil
 }
 
-func (p *VicContainer) Pty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
+func (p *VicTask) Pty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
 	return nil
 }
 
-func (p *VicContainer) CloseStdin(ctx context.Context, pid uint32) error {
+func (p *VicTask) CloseStdin(ctx context.Context, pid uint32) error {
 	return nil
+}
+
+func (p *VicTask) Checkpoint(context.Context, plugin.CheckpointOpts) error {
+	return fmt.Errorf("Check points are not supported yet")
 }
