@@ -60,6 +60,10 @@ var runCommand = cli.Command{
 			Name:  "mount",
 			Usage: "specify additional container mount (ex: type=bind,src=/tmp,dest=/host,options=rbind:ro)",
 		},
+		cli.StringSliceFlag{
+			Name:  "env",
+			Usage: "specify additional container environment variables (i.e. FOO=bar)",
+		},
 		cli.BoolFlag{
 			Name:  "rm",
 			Usage: "remove the container after running",
@@ -237,7 +241,7 @@ var runCommand = cli.Command{
 			}
 		}
 
-		createContainer, err := newCreateContainerRequest(context, id, id, spec)
+		createContainer, err := newCreateContainerRequest(context, id, id, ref, spec)
 		if err != nil {
 			return err
 		}

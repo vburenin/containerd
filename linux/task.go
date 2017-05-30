@@ -41,6 +41,7 @@ func newTask(id string, spec []byte, shim shim.ShimClient) *Task {
 
 func (c *Task) Info() plugin.TaskInfo {
 	return plugin.TaskInfo{
+		ID:          c.containerID,
 		ContainerID: c.containerID,
 		Runtime:     runtimeName,
 		Spec:        c.spec,
@@ -158,7 +159,7 @@ func (c *Task) Checkpoint(ctx context.Context, opts plugin.CheckpointOpts) error
 		AllowTerminal:    opts.AllowTerminal,
 		FileLocks:        opts.FileLocks,
 		EmptyNamespaces:  opts.EmptyNamespaces,
-		Image:            opts.Path,
+		CheckpointPath:   opts.Path,
 	})
 	return err
 }

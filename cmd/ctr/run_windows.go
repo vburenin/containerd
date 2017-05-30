@@ -61,6 +61,8 @@ func spec(id string, config *ocispec.ImageConfig, context *cli.Context) *specs.S
 		}
 	}
 
+	env := replaceOrAppendEnvValues(config.Env, context.StringSlice("env"))
+
 	return &specs.Spec{
 		Version: specs.Version,
 		Platform: specs.Platform{
@@ -74,7 +76,7 @@ func spec(id string, config *ocispec.ImageConfig, context *cli.Context) *specs.S
 			Args:     args,
 			Terminal: tty,
 			Cwd:      cwd,
-			Env:      config.Env,
+			Env:      env,
 			User: specs.User{
 				Username: config.User,
 			},
@@ -137,10 +139,11 @@ func newContainerSpec(context *cli.Context, config *ocispec.ImageConfig, imageRe
 	return json.Marshal(rtSpec)
 }
 
-func newCreateContainerRequest(context *cli.Context, id, snapshot string, spec []byte) (*containersapi.CreateContainerRequest, error) {
+func newCreateContainerRequest(context *cli.Context, id, snapshot, image string, spec []byte) (*containersapi.CreateContainerRequest, error) {
 	create := &containersapi.CreateContainerRequest{
 		Container: containersapi.Container{
-			ID: id,
+			ID:    id,
+			Image: image,
 			Spec: &protobuf.Any{
 				TypeUrl: specs.Version,
 				Value:   spec,
