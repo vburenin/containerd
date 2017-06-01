@@ -6,6 +6,7 @@ import (
 
 	"github.com/containerd/containerd/api/services/execution"
 	taskapi "github.com/containerd/containerd/api/types/task"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 const UnknownExitStatus = 255
@@ -21,13 +22,22 @@ const (
 )
 
 type Task interface {
+	Pid() uint32
 	Delete(context.Context) (uint32, error)
 	Kill(context.Context, syscall.Signal) error
 	Pause(context.Context) error
 	Resume(context.Context) error
-	Pid() uint32
 	Start(context.Context) error
 	Status(context.Context) (TaskStatus, error)
+	Wait(context.Context) (uint32, error)
+	Exec(context.Context, *specs.Process, IOCreation) (Process, error)
+	Processes(context.Context) ([]uint32, error)
+}
+
+type Process interface {
+	Pid() uint32
+	Start(context.Context) error
+	Kill(context.Context, syscall.Signal) error
 	Wait(context.Context) (uint32, error)
 }
 
@@ -120,4 +130,31 @@ func (t *task) Delete(ctx context.Context) (uint32, error) {
 		return UnknownExitStatus, err
 	}
 	return r.ExitStatus, cerr
+}
+
+func (t *task) Exec(ctx context.Context, spec *specs.Process, ioCreate IOCreation) (Process, error) {
+	i, err := ioCreate()
+	if err != nil {
+		return nil, err
+	}
+	return &process{
+		task:    t,
+		io:      i,
+		spec:    spec,
+		pidSync: make(chan struct{}),
+	}, nil
+}
+
+func (t *task) Processes(ctx context.Context) ([]uint32, error) {
+	response, err := t.client.TaskService().Processes(ctx, &execution.ProcessesRequest{
+		ContainerID: t.containerID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	var out []uint32
+	for _, p := range response.Processes {
+		out = append(out, p.Pid)
+	}
+	return out, nil
 }
