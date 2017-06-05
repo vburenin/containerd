@@ -19,6 +19,7 @@ const (
 	GRPCPlugin
 	SnapshotPlugin
 	TaskMonitorPlugin
+	DiffPlugin
 )
 
 type Registration struct {
@@ -27,7 +28,7 @@ type Registration struct {
 	Init   func(*InitContext) (interface{}, error)
 }
 
-// TODO(@crosbymichael): how to we keep this struct from growing but support dependency injection for loaded plugins?
+// TODO(@crosbymichael): how do we keep this struct from growing but support dependency injection for loaded plugins?
 type InitContext struct {
 	Root        string
 	State       string
@@ -35,6 +36,7 @@ type InitContext struct {
 	Content     content.Store
 	Meta        *bolt.DB
 	Snapshotter snapshot.Snapshotter
+	Differ      Differ
 	Config      interface{}
 	Context     context.Context
 	Monitor     TaskMonitor

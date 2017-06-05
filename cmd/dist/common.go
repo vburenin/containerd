@@ -8,11 +8,11 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/containerd/console"
+	"github.com/containerd/containerd"
 	contentapi "github.com/containerd/containerd/api/services/content"
 	imagesapi "github.com/containerd/containerd/api/services/images"
 	"github.com/containerd/containerd/content"
@@ -47,15 +47,14 @@ var registryFlags = []cli.Flag{
 	},
 }
 
+func getClient(context *cli.Context) (*containerd.Client, error) {
+	address := context.GlobalString("address")
+	//timeout := context.GlobalDuration("connect-timeout")
+
+	return containerd.New(address)
+}
+
 func resolveContentStore(context *cli.Context) (content.Store, error) {
-	root := filepath.Join(context.GlobalString("root"), "content")
-	if !filepath.IsAbs(root) {
-		var err error
-		root, err = filepath.Abs(root)
-		if err != nil {
-			return nil, err
-		}
-	}
 	conn, err := connectGRPC(context)
 	if err != nil {
 		return nil, err
