@@ -20,13 +20,19 @@ import (
 
 var empty = &google_protobuf.Empty{}
 
+const RuncRoot = "/run/containerd/runc"
+
 // New returns a new shim service that can be used via GRPC
-func New(path string) *Service {
+func New(path, namespace string) (*Service, error) {
+	if namespace == "" {
+		return nil, fmt.Errorf("shim namespace cannot be empty")
+	}
 	return &Service{
 		path:      path,
 		processes: make(map[int]process),
 		events:    make(chan *task.Event, 4096),
-	}
+		namespace: namespace,
+	}, nil
 }
 
 type Service struct {
@@ -40,10 +46,11 @@ type Service struct {
 	eventsMu      sync.Mutex
 	deferredEvent *task.Event
 	execID        int
+	namespace     string
 }
 
 func (s *Service) Create(ctx context.Context, r *shimapi.CreateRequest) (*shimapi.CreateResponse, error) {
-	process, err := newInitProcess(ctx, s.path, r)
+	process, err := newInitProcess(ctx, s.path, s.namespace, r)
 	if err != nil {
 		return nil, err
 	}
@@ -82,13 +89,29 @@ func (s *Service) Start(ctx context.Context, r *shimapi.StartRequest) (*google_p
 }
 
 func (s *Service) Delete(ctx context.Context, r *shimapi.DeleteRequest) (*shimapi.DeleteResponse, error) {
+	p := s.initProcess
+	// TODO (@crosbymichael): how to handle errors here
+	p.Delete(ctx)
+	s.mu.Lock()
+	delete(s.processes, p.Pid())
+	s.mu.Unlock()
+	return &shimapi.DeleteResponse{
+		ExitStatus: uint32(p.Status()),
+		ExitedAt:   p.ExitedAt(),
+	}, nil
+}
+
+func (s *Service) DeleteProcess(ctx context.Context, r *shimapi.DeleteProcessRequest) (*shimapi.DeleteResponse, error) {
+	if int(r.Pid) == s.initProcess.pid {
+		return nil, fmt.Errorf("cannot delete init process with DeleteProcess")
+	}
 	s.mu.Lock()
 	p, ok := s.processes[int(r.Pid)]
 	s.mu.Unlock()
 	if !ok {
-		p = s.initProcess
+		return nil, fmt.Errorf("process %d not found", r.Pid)
 	}
-	// TODO: how to handle errors here
+	// TODO (@crosbymichael): how to handle errors here
 	p.Delete(ctx)
 	s.mu.Lock()
 	delete(s.processes, p.Pid())

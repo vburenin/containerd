@@ -1,15 +1,9 @@
 package main
 
 import (
-	gocontext "context"
-	"runtime"
+	"fmt"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-
-	containersapi "github.com/containerd/containerd/api/services/containers"
-	"github.com/containerd/containerd/api/services/execution"
-	"github.com/pkg/errors"
+	"github.com/containerd/containerd"
 	"github.com/urfave/cli"
 )
 
@@ -18,48 +12,30 @@ var deleteCommand = cli.Command{
 	Usage:     "delete an existing container",
 	ArgsUsage: "CONTAINER",
 	Action: func(context *cli.Context) error {
-		containers, err := getContainersService(context)
+		ctx, cancel := appContext(context)
+		defer cancel()
+		client, err := newClient(context)
 		if err != nil {
 			return err
 		}
-		tasks, err := getTasksService(context)
+		container, err := client.LoadContainer(ctx, context.Args().First())
 		if err != nil {
 			return err
 		}
-
-		snapshotter, err := getSnapshotter(context)
+		task, err := container.Task(ctx, nil)
+		if err != nil {
+			return container.Delete(ctx)
+		}
+		status, err := task.Status(ctx)
 		if err != nil {
 			return err
 		}
-		id := context.Args().First()
-		if id == "" {
-			return errors.New("container id must be provided")
-		}
-		ctx := gocontext.TODO()
-		_, err = containers.Delete(ctx, &containersapi.DeleteContainerRequest{
-			ID: id,
-		})
-		if err != nil {
-			return errors.Wrap(err, "failed to delete container")
-		}
-
-		_, err = tasks.Delete(ctx, &execution.DeleteRequest{
-			ContainerID: id,
-		})
-		if err != nil {
-			// Ignore error if task has already been removed, task is
-			// removed by default after run
-			if grpc.Code(errors.Cause(err)) != codes.NotFound {
-				return errors.Wrap(err, "failed to task container")
+		if status == containerd.Stopped {
+			if _, err := task.Delete(ctx); err != nil {
+				return err
 			}
+			return container.Delete(ctx)
 		}
-
-		if runtime.GOOS != "windows" {
-			if err := snapshotter.Remove(ctx, id); err != nil {
-				return errors.Wrapf(err, "failed to remove snapshot %q", id)
-			}
-		}
-
-		return nil
+		return fmt.Errorf("cannot delete a container with an existing task")
 	},
 }

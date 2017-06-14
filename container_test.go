@@ -2,7 +2,6 @@ package containerd
 
 import (
 	"bytes"
-	"context"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -27,7 +26,10 @@ func TestContainerList(t *testing.T) {
 	}
 	defer client.Close()
 
-	containers, err := client.Containers(context.Background())
+	ctx, cancel := testContext()
+	defer cancel()
+
+	containers, err := client.Containers(ctx)
 	if err != nil {
 		t.Errorf("container list returned error %v", err)
 		return
@@ -41,7 +43,7 @@ func TestNewContainer(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
-	id := "NewContainer"
+	id := t.Name()
 	client, err := New(address)
 	if err != nil {
 		t.Fatal(err)
@@ -53,12 +55,16 @@ func TestNewContainer(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(context.Background(), id, spec)
+
+	ctx, cancel := testContext()
+	defer cancel()
+
+	container, err := client.NewContainer(ctx, id, WithSpec(spec))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(context.Background())
+	defer container.Delete(ctx)
 	if container.ID() != id {
 		t.Errorf("expected container id %q but received %q", id, container.ID())
 	}
@@ -66,7 +72,7 @@ func TestNewContainer(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	if err := container.Delete(context.Background()); err != nil {
+	if err := container.Delete(ctx); err != nil {
 		t.Error(err)
 		return
 	}
@@ -83,9 +89,11 @@ func TestContainerStart(t *testing.T) {
 	defer client.Close()
 
 	var (
-		ctx = context.Background()
-		id  = "ContainerStart"
+		ctx, cancel = testContext()
+		id          = t.Name()
 	)
+	defer cancel()
+
 	image, err := client.GetImage(ctx, testImage)
 	if err != nil {
 		t.Error(err)
@@ -96,7 +104,7 @@ func TestContainerStart(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, spec, WithImage(image), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
 	if err != nil {
 		t.Error(err)
 		return
@@ -151,10 +159,12 @@ func TestContainerOutput(t *testing.T) {
 	defer client.Close()
 
 	var (
-		ctx      = context.Background()
-		id       = "ContainerOutput"
-		expected = "kingkoye"
+		ctx, cancel = testContext()
+		id          = t.Name()
+		expected    = "kingkoye"
 	)
+	defer cancel()
+
 	image, err := client.GetImage(ctx, testImage)
 	if err != nil {
 		t.Error(err)
@@ -165,7 +175,7 @@ func TestContainerOutput(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, spec, WithImage(image), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
 	if err != nil {
 		t.Error(err)
 		return
@@ -222,9 +232,11 @@ func TestContainerExec(t *testing.T) {
 	defer client.Close()
 
 	var (
-		ctx = context.Background()
-		id  = "ContainerExec"
+		ctx, cancel = testContext()
+		id          = t.Name()
 	)
+	defer cancel()
+
 	image, err := client.GetImage(ctx, testImage)
 	if err != nil {
 		t.Error(err)
@@ -235,7 +247,7 @@ func TestContainerExec(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, spec, WithImage(image), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
 	if err != nil {
 		t.Error(err)
 		return
@@ -290,6 +302,14 @@ func TestContainerExec(t *testing.T) {
 	if status != 6 {
 		t.Errorf("expected exec exit code 6 but received %d", status)
 	}
+	deleteStatus, err := process.Delete(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if deleteStatus != 6 {
+		t.Errorf("expected delete exit code e6 but received %d", deleteStatus)
+	}
 	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
 		t.Error(err)
 	}
@@ -307,9 +327,11 @@ func TestContainerProcesses(t *testing.T) {
 	defer client.Close()
 
 	var (
-		ctx = context.Background()
-		id  = "ContainerProcesses"
+		ctx, cancel = testContext()
+		id          = t.Name()
 	)
+	defer cancel()
+
 	image, err := client.GetImage(ctx, testImage)
 	if err != nil {
 		t.Error(err)
@@ -320,7 +342,7 @@ func TestContainerProcesses(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, spec, WithImage(image), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
 	if err != nil {
 		t.Error(err)
 		return
@@ -378,9 +400,11 @@ func TestContainerCloseStdin(t *testing.T) {
 	defer client.Close()
 
 	var (
-		ctx = context.Background()
-		id  = "ContainerCloseStdin"
+		ctx, cancel = testContext()
+		id          = t.Name()
 	)
+	defer cancel()
+
 	image, err := client.GetImage(ctx, testImage)
 	if err != nil {
 		t.Error(err)
@@ -391,7 +415,7 @@ func TestContainerCloseStdin(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, spec, WithImage(image), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
 	if err != nil {
 		t.Error(err)
 		return
@@ -460,9 +484,11 @@ func TestContainerAttach(t *testing.T) {
 	defer client.Close()
 
 	var (
-		ctx = context.Background()
-		id  = "ContainerAttach"
+		ctx, cancel = testContext()
+		id          = t.Name()
 	)
+	defer cancel()
+
 	image, err := client.GetImage(ctx, testImage)
 	if err != nil {
 		t.Error(err)
@@ -473,7 +499,7 @@ func TestContainerAttach(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, spec, WithImage(image), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
 	if err != nil {
 		t.Error(err)
 		return
@@ -540,7 +566,7 @@ func TestContainerAttach(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	if task, err = container.LoadTask(ctx, WithAttach(r, ow, ioutil.Discard)); err != nil {
+	if task, err = container.Task(ctx, WithAttach(r, ow, ioutil.Discard)); err != nil {
 		t.Error(err)
 		return
 	}

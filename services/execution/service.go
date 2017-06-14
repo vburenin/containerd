@@ -7,7 +7,6 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"sync"
 
 	"github.com/boltdb/bolt"
 	api "github.com/containerd/containerd/api/services/execution"
@@ -24,6 +23,7 @@ import (
 	protobuf "github.com/gogo/protobuf/types"
 	google_protobuf "github.com/golang/protobuf/ptypes/empty"
 	specs "github.com/opencontainers/image-spec/specs-go"
+	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -48,7 +48,6 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 	}
 	return &Service{
 		runtimes:  ic.Runtimes,
-		tasks:     make(map[string]plugin.Task),
 		db:        ic.Meta,
 		collector: c,
 		store:     ic.Content,
@@ -56,10 +55,7 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 }
 
 type Service struct {
-	mu sync.Mutex
-
 	runtimes  map[string]plugin.Runtime
-	tasks     map[string]plugin.Task
 	db        *bolt.DB
 	collector *collector
 	store     content.Store
@@ -67,16 +63,6 @@ type Service struct {
 
 func (s *Service) Register(server *grpc.Server) error {
 	api.RegisterTasksServer(server, s)
-	// load all tasks
-	for _, r := range s.runtimes {
-		tasks, err := r.Tasks(context.Background())
-		if err != nil {
-			return err
-		}
-		for _, c := range tasks {
-			s.tasks[c.Info().ContainerID] = c
-		}
-	}
 	return nil
 }
 
@@ -142,25 +128,13 @@ func (s *Service) Create(ctx context.Context, r *api.CreateRequest) (*api.Create
 	if err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	if _, ok := s.tasks[r.ContainerID]; ok {
-		s.mu.Unlock()
-		return nil, grpc.Errorf(codes.AlreadyExists, "task %v already exists", r.ContainerID)
-	}
 	c, err := runtime.Create(ctx, r.ContainerID, opts)
 	if err != nil {
-		s.mu.Unlock()
-		return nil, err
+		return nil, errors.Wrap(err, "runtime create failed")
 	}
-	s.tasks[r.ContainerID] = c
-	s.mu.Unlock()
 	state, err := c.State(ctx)
 	if err != nil {
-		s.mu.Lock()
-		delete(s.tasks, r.ContainerID)
-		runtime.Delete(ctx, c)
-		s.mu.Unlock()
-		return nil, err
+		log.G(ctx).Error(err)
 	}
 	return &api.CreateResponse{
 		ContainerID: r.ContainerID,
@@ -169,7 +143,7 @@ func (s *Service) Create(ctx context.Context, r *api.CreateRequest) (*api.Create
 }
 
 func (s *Service) Start(ctx context.Context, r *api.StartRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -180,7 +154,7 @@ func (s *Service) Start(ctx context.Context, r *api.StartRequest) (*google_proto
 }
 
 func (s *Service) Delete(ctx context.Context, r *api.DeleteRequest) (*api.DeleteResponse, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -192,9 +166,21 @@ func (s *Service) Delete(ctx context.Context, r *api.DeleteRequest) (*api.Delete
 	if err != nil {
 		return nil, err
 	}
+	return &api.DeleteResponse{
+		ExitStatus: exit.Status,
+		ExitedAt:   exit.Timestamp,
+	}, nil
+}
 
-	delete(s.tasks, r.ContainerID)
-
+func (s *Service) DeleteProcess(ctx context.Context, r *api.DeleteProcessRequest) (*api.DeleteResponse, error) {
+	c, err := s.getTask(ctx, r.ContainerID)
+	if err != nil {
+		return nil, err
+	}
+	exit, err := c.DeleteProcess(ctx, r.Pid)
+	if err != nil {
+		return nil, err
+	}
 	return &api.DeleteResponse{
 		ExitStatus: exit.Status,
 		ExitedAt:   exit.Timestamp,
@@ -237,7 +223,7 @@ func taskFromContainerd(ctx context.Context, c plugin.Task) (*task.Task, error) 
 }
 
 func (s *Service) Info(ctx context.Context, r *api.InfoRequest) (*api.InfoResponse, error) {
-	task, err := s.getTask(r.ContainerID)
+	task, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -252,20 +238,24 @@ func (s *Service) Info(ctx context.Context, r *api.InfoRequest) (*api.InfoRespon
 
 func (s *Service) List(ctx context.Context, r *api.ListRequest) (*api.ListResponse, error) {
 	resp := &api.ListResponse{}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, cd := range s.tasks {
-		c, err := taskFromContainerd(ctx, cd)
+	for _, r := range s.runtimes {
+		tasks, err := r.Tasks(ctx)
 		if err != nil {
 			return nil, err
 		}
-		resp.Tasks = append(resp.Tasks, c)
+		for _, t := range tasks {
+			tt, err := taskFromContainerd(ctx, t)
+			if err != nil {
+				return nil, err
+			}
+			resp.Tasks = append(resp.Tasks, tt)
+		}
 	}
 	return resp, nil
 }
 
 func (s *Service) Pause(ctx context.Context, r *api.PauseRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -277,7 +267,7 @@ func (s *Service) Pause(ctx context.Context, r *api.PauseRequest) (*google_proto
 }
 
 func (s *Service) Resume(ctx context.Context, r *api.ResumeRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -289,7 +279,7 @@ func (s *Service) Resume(ctx context.Context, r *api.ResumeRequest) (*google_pro
 }
 
 func (s *Service) Kill(ctx context.Context, r *api.KillRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -310,7 +300,7 @@ func (s *Service) Kill(ctx context.Context, r *api.KillRequest) (*google_protobu
 }
 
 func (s *Service) Processes(ctx context.Context, r *api.ProcessesRequest) (*api.ProcessesResponse, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -342,7 +332,7 @@ func (s *Service) Events(r *api.EventsRequest, server api.Tasks_EventsServer) er
 }
 
 func (s *Service) Exec(ctx context.Context, r *api.ExecRequest) (*api.ExecResponse, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -368,7 +358,7 @@ func (s *Service) Exec(ctx context.Context, r *api.ExecRequest) (*api.ExecRespon
 }
 
 func (s *Service) Pty(ctx context.Context, r *api.PtyRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -382,7 +372,7 @@ func (s *Service) Pty(ctx context.Context, r *api.PtyRequest) (*google_protobuf.
 }
 
 func (s *Service) CloseStdin(ctx context.Context, r *api.CloseStdinRequest) (*google_protobuf.Empty, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -393,7 +383,7 @@ func (s *Service) CloseStdin(ctx context.Context, r *api.CloseStdinRequest) (*go
 }
 
 func (s *Service) Checkpoint(ctx context.Context, r *api.CheckpointRequest) (*api.CheckpointResponse, error) {
-	c, err := s.getTask(r.ContainerID)
+	c, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
@@ -458,14 +448,14 @@ func (s *Service) writeContent(ctx context.Context, mediaType, ref string, r io.
 	}, nil
 }
 
-func (s *Service) getTask(id string) (plugin.Task, error) {
-	s.mu.Lock()
-	c, ok := s.tasks[id]
-	s.mu.Unlock()
-	if !ok {
-		return nil, grpc.Errorf(codes.NotFound, "task %v not found", id)
+func (s *Service) getTask(ctx context.Context, id string) (plugin.Task, error) {
+	for _, r := range s.runtimes {
+		t, err := r.Get(ctx, id)
+		if err == nil {
+			return t, nil
+		}
 	}
-	return c, nil
+	return nil, grpc.Errorf(codes.NotFound, "task %v not found", id)
 }
 
 func (s *Service) getRuntime(name string) (plugin.Runtime, error) {

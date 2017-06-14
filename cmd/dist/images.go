@@ -12,15 +12,24 @@ import (
 	"github.com/urfave/cli"
 )
 
+var imageCommand = cli.Command{
+	Name:  "images",
+	Usage: "image management",
+	Subcommands: cli.Commands{
+		imagesListCommand,
+		imageRemoveCommand,
+	},
+}
+
 var imagesListCommand = cli.Command{
 	Name:        "list",
-	Aliases:     []string{"images"},
+	Aliases:     []string{"ls"},
 	Usage:       "list images known to containerd",
 	ArgsUsage:   "[flags] <ref>",
 	Description: `List images registered with containerd.`,
 	Flags:       []cli.Flag{},
 	Action: func(clicontext *cli.Context) error {
-		ctx, cancel := appContext()
+		ctx, cancel := appContext(clicontext)
 		defer cancel()
 
 		imageStore, err := resolveImageStore(clicontext)
@@ -54,17 +63,18 @@ var imagesListCommand = cli.Command{
 	},
 }
 
-var rmiCommand = cli.Command{
-	Name:        "rmi",
-	Usage:       "Delete one or more images by reference.",
+var imageRemoveCommand = cli.Command{
+	Name:        "remove",
+	Aliases:     []string{"rm"},
+	Usage:       "Remove one or more images by reference.",
 	ArgsUsage:   "[flags] <ref> [<ref>, ...]",
-	Description: `Delete one or more images by reference.`,
+	Description: `Remove one or more images by reference.`,
 	Flags:       []cli.Flag{},
 	Action: func(clicontext *cli.Context) error {
 		var (
 			exitErr error
 		)
-		ctx, cancel := appContext()
+		ctx, cancel := appContext(clicontext)
 		defer cancel()
 
 		imageStore, err := resolveImageStore(clicontext)

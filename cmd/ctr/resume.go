@@ -1,29 +1,27 @@
 package main
 
-import (
-	gocontext "context"
-	"errors"
-
-	"github.com/containerd/containerd/api/services/execution"
-	"github.com/urfave/cli"
-)
+import "github.com/urfave/cli"
 
 var resumeCommand = cli.Command{
 	Name:      "resume",
 	Usage:     "resume a paused container",
 	ArgsUsage: "CONTAINER",
 	Action: func(context *cli.Context) error {
-		tasks, err := getTasksService(context)
+		ctx, cancel := appContext(context)
+		defer cancel()
+
+		client, err := newClient(context)
 		if err != nil {
 			return err
 		}
-		id := context.Args().First()
-		if id == "" {
-			return errors.New("container id must be provided")
+		container, err := client.LoadContainer(ctx, context.Args().First())
+		if err != nil {
+			return err
 		}
-		_, err = tasks.Resume(gocontext.Background(), &execution.ResumeRequest{
-			ContainerID: id,
-		})
-		return err
+		task, err := container.Task(ctx, nil)
+		if err != nil {
+			return err
+		}
+		return task.Resume(ctx)
 	},
 }

@@ -1,9 +1,6 @@
 package main
 
 import (
-	gocontext "context"
-
-	"github.com/containerd/containerd/api/services/execution"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 )
@@ -13,8 +10,9 @@ var killCommand = cli.Command{
 	Usage: "signal a container (default: SIGTERM)",
 	Flags: []cli.Flag{
 		cli.StringFlag{
-			Name:  "id",
-			Usage: "id of the container",
+			Name:  "signal, s",
+			Value: "SIGTERM",
+			Usage: "signal to send to the container",
 		},
 		cli.IntFlag{
 			Name:  "pid",
@@ -27,49 +25,37 @@ var killCommand = cli.Command{
 		},
 	},
 	Action: func(context *cli.Context) error {
-		id := context.String("id")
+		var (
+			id          = context.Args().First()
+			ctx, cancel = appContext(context)
+		)
+		defer cancel()
 		if id == "" {
 			return errors.New("container id must be provided")
 		}
-
-		sigstr := context.Args().First()
-		if sigstr == "" {
-			sigstr = "SIGTERM"
-		}
-
-		signal, err := parseSignal(sigstr)
+		signal, err := parseSignal(context.String("signal"))
 		if err != nil {
 			return err
 		}
-
-		pid := context.Int("pid")
-		all := context.Bool("all")
+		var (
+			pid = context.Int("pid")
+			all = context.Bool("all")
+		)
 		if pid > 0 && all {
 			return errors.New("enter a pid or all; not both")
 		}
-
-		killRequest := &execution.KillRequest{
-			ContainerID: id,
-			Signal:      uint32(signal),
-			PidOrAll: &execution.KillRequest_Pid{
-				Pid: uint32(pid),
-			},
-		}
-
-		if all {
-			killRequest.PidOrAll = &execution.KillRequest_All{
-				All: true,
-			}
-		}
-
-		tasks, err := getTasksService(context)
+		client, err := newClient(context)
 		if err != nil {
 			return err
 		}
-		_, err = tasks.Kill(gocontext.Background(), killRequest)
+		container, err := client.LoadContainer(ctx, id)
 		if err != nil {
 			return err
 		}
-		return nil
+		task, err := container.Task(ctx, nil)
+		if err != nil {
+			return err
+		}
+		return task.Kill(ctx, signal)
 	},
 }

@@ -7,6 +7,7 @@ type TaskInfo struct {
 	ContainerID string
 	Runtime     string
 	Spec        []byte
+	Namespace   string
 }
 
 type Task interface {
@@ -32,6 +33,8 @@ type Task interface {
 	CloseStdin(context.Context, uint32) error
 	// Checkpoint checkpoints a container to an image with live system data
 	Checkpoint(context.Context, CheckpointOpts) error
+	// DeleteProcess deletes a specific exec process via the pid
+	DeleteProcess(context.Context, uint32) (*Exit, error)
 }
 
 type CheckpointOpts struct {
