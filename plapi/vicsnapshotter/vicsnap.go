@@ -10,6 +10,8 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/plapi/client"
+	"github.com/containerd/containerd/plapi/client/storage"
+	"github.com/containerd/containerd/plapi/models"
 	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plapi/vicruntime"
 	"github.com/containerd/containerd/plugin"
@@ -57,10 +59,26 @@ func NewVicSnap(ic *plugin.InitContext) *VicSnap {
 		active:         make(map[string][]mount.Mount),
 		mounts:         make(map[string]*VicMount),
 	}
+	vs.createStorage()
 	return vs
 }
 
 var _ snapshot.Snapshotter = &VicSnap{}
+
+func (vs *VicSnap) createStorage() {
+	is := models.ImageStore{
+		Name: vs.storageName,
+	}
+	r, err := vs.plClient.Storage.CreateImageStore(
+		storage.NewCreateImageStoreParamsWithContext(context.TODO()).WithBody(&is),
+	)
+	if err != nil {
+		logrus.Warnf("Storage is not created: %s", err)
+		return
+	}
+	logrus.Debugf("Storage has been created: %s", r.Payload.URL)
+
+}
 
 func (vs *VicSnap) Stat(ctx context.Context, key string) (snapshot.Info, error) {
 	vs.mu.Lock()
@@ -165,13 +183,39 @@ func (vs *VicSnap) Commit(ctx context.Context, name, key string) error {
 		Kind:     snapshot.KindCommitted,
 		Readonly: true,
 	}
-	return nil
+
+	params := storage.NewCommitImageParamsWithContext(ctx).
+		WithStoreName(vs.storageName).
+		WithNewID(name).
+		WithOldID(key)
+
+	_, err := vs.plClient.Storage.CommitImage(params)
+	return err
 }
 
 func (vs *VicSnap) Remove(ctx context.Context, key string) error {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	s, ok := vs.snapshots[key]
+
+	if !ok {
+		return snapshot.ErrSnapshotNotExist
+	}
+	if s.Kind != snapshot.KindActive {
+		return snapshot.ErrSnapshotNotActive
+	}
+	params := storage.NewRemoveImageParamsWithContext(ctx).WithStoreName(vs.storageName).WithImageID(key)
+
+	if _, err := vs.plClient.Storage.RemoveImage(params); err != nil {
+		return err
+	}
+
+	delete(vs.snapshots, key)
 	return nil
 }
 
 func (vs *VicSnap) Walk(ctx context.Context, fn func(context.Context, snapshot.Info) error) error {
+	logrus.Info("VicSnap Walk call")
 	return nil
 }

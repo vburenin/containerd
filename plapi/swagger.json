@@ -440,6 +440,156 @@
 				}
 			}
 		},
+		"/snapshot/{store_name}": {
+			"delete": {
+				"description": "Delete image layer",
+				"tags": [
+					"storage"
+				],
+				"operationId": "RemoveImage",
+				"parameters": [
+					{
+						"name": "store_name",
+						"type": "string",
+						"in": "path",
+						"required": true
+					},
+					{
+						"name": "image_id",
+						"type": "string",
+						"in": "query",
+						"required": true
+					}
+				],
+				"responses": {
+					"201": {
+						"description": "Image successfully deleted",
+						"schema": {
+							"type": "string"
+						}
+					},
+					"default": {
+						"description": "error",
+						"schema": {
+							"$ref": "#/definitions/Error"
+						}
+					}
+				}
+			},
+			"post": {
+				"description": "Creates a new image layer in an image store that is not available for use",
+				"summary": "Creates a new image layer not available for use",
+				"tags": [
+					"storage"
+				],
+				"operationId": "UnpackImage",
+				"consumes": [
+					"application/octet-stream"
+				],
+				"parameters": [
+					{
+						"name": "image_file",
+						"in": "body",
+						"schema": {
+							"type": "string",
+							"format": "binary"
+						}
+					},
+					{
+						"name": "store_name",
+						"type": "string",
+						"in": "path",
+						"required": true
+					},
+					{
+						"name": "image_id",
+						"type": "string",
+						"in": "query",
+						"required": true
+					},
+					{
+						"name": "parent_id",
+						"type": "string",
+						"in": "query",
+						"required": true
+					},
+					{
+						"name": "metadatakey",
+						"type": "string",
+						"x-nullable": false,
+						"in": "query"
+					},
+					{
+						"name": "metadataval",
+						"type": "string",
+						"x-nullable": false,
+						"in": "query"
+					}
+				],
+				"responses": {
+					"201": {
+						"description": "Created",
+						"schema": {
+							"type": "string"
+						}
+					},
+					"default": {
+						"description": "error",
+						"schema": {
+							"$ref": "#/definitions/Error"
+						}
+					}
+				}
+			},
+			"put": {
+				"description": "Commit image",
+				"tags": [
+					"storage"
+				],
+				"consumes": [
+					"application/json",
+					"application/octet-stream"
+				],
+				"produces": [
+					"application/json"
+				],
+				"operationId": "CommitImage",
+				"parameters": [
+					{
+						"name": "store_name",
+						"type": "string",
+						"in": "path",
+						"required": true
+					},
+					{
+						"name": "old_id",
+						"type": "string",
+						"in": "query",
+						"required": true
+					},
+					{
+						"name": "new_id",
+						"type": "string",
+						"in": "query",
+						"required": true
+					}
+				],
+				"responses": {
+					"201": {
+						"description": "Image successfully committed",
+						"schema": {
+							"type": "string"
+						}
+					},
+					"default": {
+						"description": "error",
+						"schema": {
+							"$ref": "#/definitions/Error"
+						}
+					}
+				}
+			}
+		},
 		"/storage/{store_name}/tar/{id}": {
 			"get": {
 				"description": "Get an image by id in an image store as a tar file",

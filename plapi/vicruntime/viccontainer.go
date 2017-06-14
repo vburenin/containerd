@@ -18,13 +18,8 @@ import (
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/go-runc"
 	"github.com/go-openapi/swag"
-	"github.com/golang/protobuf/ptypes/empty"
 	"google.golang.org/grpc"
 )
-
-var protobufEmpty = &empty.Empty{}
-
-const VicRuntimeName = "vmware"
 
 type State struct {
 	pid    uint32
@@ -39,15 +34,6 @@ func (s State) Status() plugin.Status {
 	return s.status
 }
 
-type CommData struct {
-	con console.Console
-
-	stdin  string
-	stdout string
-	stderr string
-	pid    int32
-}
-
 type VicTask struct {
 	client   *client.PortLayer
 	bundle   string
@@ -56,7 +42,8 @@ type VicTask struct {
 	root     string
 	shimSock string
 
-	initProc *CommData
+	comm *plugin.IO
+	con  console.Console
 
 	tty      bool
 	statusMu sync.Mutex
@@ -78,17 +65,15 @@ const (
 	AnnotationContainerdID = "containerd.id"
 )
 
-func NewVicContainer(ctx context.Context, portLayer *client.PortLayer,
+func NewVicTask(ctx context.Context, portLayer *client.PortLayer,
 	root, id string, opts plugin.CreateOpts) (plugin.Task, error) {
 
-	c := &VicTask{}
-	c.bundle = filepath.Join(root, id)
-	c.id = id
-	c.initProc.stdin = opts.IO.Stdin
-	c.initProc.stdout = opts.IO.Stdout
-	c.initProc.stderr = opts.IO.Stderr
-	c.tty = opts.IO.Terminal
-	c.client = portLayer
+	c := &VicTask{
+		client: portLayer,
+		comm:   &opts.IO,
+		bundle: filepath.Join(root, id),
+		id:     id,
+	}
 
 	for _, v := range c.mounts {
 		if v.Target == "" || v.Target == "/" {
@@ -148,9 +133,9 @@ Mar  9 2017 10:37:00.655Z INFO  Create params. Name: %!s(*string=<nil>): {
 		ImageStore:      &models.ImageStore{Name: c.storage},
 		NetworkDisabled: false,
 		Annotations: map[string]string{
-			AnnotationStdInKey:     c.initProc.stdin,
-			AnnotationStdOutKey:    c.initProc.stdout,
-			AnnotationStdErrKey:    c.initProc.stderr,
+			AnnotationStdInKey:     c.comm.Stdin,
+			AnnotationStdOutKey:    c.comm.Stdout,
+			AnnotationStdErrKey:    c.comm.Stderr,
 			AnnotationImageID:      c.imageID,
 			AnnotationStorageName:  c.storage,
 			AnnotationContainerdID: id,
@@ -206,25 +191,23 @@ Mar  9 2017 10:37:00.655Z INFO  Create params. Name: %!s(*string=<nil>): {
 func RestoreVicContaner(ctx context.Context, portlayer *client.PortLayer,
 	root string, ci *models.ContainerInfo) plugin.Task {
 
-	c := &VicTask{}
-	c.root = root
-	c.client = portlayer
-	c.initProc = &CommData{}
-
 	cfg := ci.ContainerConfig
-	c.portLayerId = cfg.ContainerID
-	c.bundle = cfg.LayerID
-	if cfg.Tty != nil {
-		c.tty = *cfg.Tty
+	c := &VicTask{
+		root:   root,
+		client: portlayer,
+		comm: &plugin.IO{
+			Stdout:   cfg.Annotations[AnnotationStdOutKey],
+			Stdin:    cfg.Annotations[AnnotationStdOutKey],
+			Stderr:   cfg.Annotations[AnnotationStdErrKey],
+			Terminal: cfg.Tty != nil && *cfg.Tty,
+		},
+		portLayerId: cfg.ContainerID,
+		bundle:      cfg.LayerID,
+		imageID:     cfg.Annotations[AnnotationImageID],
+		storage:     cfg.Annotations[AnnotationStorageName],
+		id:          cfg.Annotations[AnnotationContainerdID],
 	}
-	c.initProc.stdout = cfg.Annotations[AnnotationStdOutKey]
-	c.initProc.stdin = cfg.Annotations[AnnotationStdOutKey]
-	c.initProc.stderr = cfg.Annotations[AnnotationStdErrKey]
 
-	c.imageID = cfg.Annotations[AnnotationImageID]
-	c.storage = cfg.Annotations[AnnotationStorageName]
-
-	c.id = cfg.Annotations[AnnotationContainerdID]
 	if c.id == "" {
 		c.id = c.portLayerId
 	}
@@ -243,7 +226,7 @@ func (p *VicTask) getHandle(ctx context.Context) (string, error) {
 }
 
 func (p *VicTask) commitHandle(ctx context.Context, h string) error {
-	logrus.Debugf("Commiting handle: %s", h)
+	logrus.Debugf("Committing handle: %s", h)
 
 	commitParams := containers.NewCommitParamsWithContext(ctx).WithHandle(h).WithWaitTime(swag.Int32(5))
 	_, err := p.client.Containers.Commit(commitParams)
@@ -265,7 +248,8 @@ func (p *VicTask) runIOServers(ctx context.Context) error {
 		if err != nil {
 			return err
 		}
-		p.initProc.con = con
+
+		p.con = con
 
 		go func() {
 			stdInParams := interaction.NewContainerSetStdinParamsWithContext(ctx).WithID("tty-in")
@@ -293,7 +277,7 @@ func (p *VicTask) Info() plugin.TaskInfo {
 	return plugin.TaskInfo{
 		ID:          p.id,
 		ContainerID: p.id,
-		Runtime:     VicRuntimeName,
+		Runtime:     runtimeName,
 		Spec:        nil,
 	}
 }
@@ -321,29 +305,44 @@ func (p *VicTask) State(ctx context.Context) (plugin.State, error) {
 
 	h, err := p.getHandle(ctx)
 	if err != nil {
-		return nil, err
+		return plugin.State{}, err
 	}
 
 	r, err := p.client.Containers.GetState(containers.NewGetStateParamsWithContext(ctx).WithHandle(h))
 	if err != nil {
-		return nil, err
+		return plugin.State{}, err
 	}
 
-	state := plugin.Status(0)
+	status := plugin.Status(0)
 	switch r.Payload.State {
 	case "RUNNING":
-		state = plugin.RunningStatus
+		status = plugin.RunningStatus
 	case "STOPPED":
-		state = plugin.StoppedStatus
+		status = plugin.StoppedStatus
 	case "CREATED":
-		state = plugin.CreatedStatus
+		status = plugin.CreatedStatus
 	default:
-		state = plugin.Status(0)
+		status = plugin.Status(0)
 	}
 
-	return &State{
-		pid:    1,
-		status: state,
+	//type State struct {
+	//	// Status is the current status of the container
+	//	Status
+	//	// Pid is the main process id for the container
+	//	Pid      uint32
+	//	Stdin    string
+	//	Stdout   string
+	//	Stderr   string
+	//	Terminal bool
+	//}
+
+	return plugin.State{
+		Status:   status,
+		Pid:      1,
+		Stdin:    p.comm.Stdin,
+		Stdout:   p.comm.Stdout,
+		Stderr:   p.comm.Stderr,
+		Terminal: p.tty,
 	}, nil
 }
 

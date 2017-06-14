@@ -72,7 +72,7 @@ func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts)
 		return nil, err
 	}
 
-	s, err := NewVicContainer(ctx, r.pl, r.root, id, opts)
+	s, err := NewVicTask(ctx, r.pl, r.root, id, opts)
 	if err != nil {
 		os.RemoveAll(path)
 		return nil, err

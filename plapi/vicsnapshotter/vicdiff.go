@@ -6,18 +6,12 @@ import (
 	"io/ioutil"
 	"strings"
 
-	"google.golang.org/grpc"
-
 	"github.com/Sirupsen/logrus"
-	"github.com/containerd/containerd/api/services/diff"
-	diffapi "github.com/containerd/containerd/api/services/diff"
-	"github.com/containerd/containerd/api/types/descriptor"
-	mounttypes "github.com/containerd/containerd/api/types/mount"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/storage"
-	"github.com/containerd/containerd/plapi/models"
 	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plapi/vicruntime"
 	"github.com/containerd/containerd/plugin"
@@ -25,12 +19,12 @@ import (
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/pkg/errors"
-	context "golang.org/x/net/context"
+	"golang.org/x/net/context"
 )
 
 func init() {
-	plugin.Register("vicdiff-grpc", &plugin.Registration{
-		Type: plugin.GRPCPlugin,
+	plugin.Register("diff-vic", &plugin.Registration{
+		Type: plugin.DiffPlugin,
 		Init: func(ic *plugin.InitContext) (interface{}, error) {
 			cfg := ic.Config.(*vicconfig.Config)
 			return &VicDiffer{
@@ -49,54 +43,47 @@ type VicDiffer struct {
 	plClient    *client.PortLayer
 }
 
-func (vd *VicDiffer) Register(gs *grpc.Server) error {
-	diffapi.RegisterDiffServer(gs, vd)
-	return nil
-}
+var emptyDesc = ocispec.Descriptor{}
 
-func (vd *VicDiffer) Apply(ctx context.Context, er *diff.ApplyRequest) (*diff.ApplyResponse, error) {
-	desc := toDescriptor(er.Diff)
-	// TODO: Check for supported media types
+func (vd *VicDiffer) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []mount.Mount) (ocispec.Descriptor, error) {
 
-	mounts := toMounts(er.Mounts)
 	if len(mounts) == 0 {
-		return nil, errors.New("No mounts was given")
+		return emptyDesc, errors.New("No mounts was given")
 	}
 
 	r, err := vd.store.Reader(ctx, desc.Digest)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to get reader from content store")
+		return emptyDesc, errors.Wrap(err, "failed to get reader from content store")
 	}
 	defer r.Close()
 
 	ds, err := compression.DecompressStream(r)
-	digester := digest.Canonical.Digester()
 
 	if err != nil {
-		return nil, err
+		return emptyDesc, err
 	}
 
-	rc := &readCounter{
-		r: io.TeeReader(ds, digester.Hash()),
+	rc := &readCounter{r: ds}
+
+	vicMount, err := parseMount(mounts[0])
+	if err != nil {
+		return emptyDesc, err
 	}
 
-	img, err := vd.writeImage(ctx, r, desc.Digest.String(), mounts[0])
-	logrus.Infof("returned image data: %q", img)
+	checkSum, err := vd.writeImage(ctx, ds, vicMount.current, vicMount)
 
 	// Read any trailing data.
 	if _, err := io.Copy(ioutil.Discard, r); err != nil {
-		return nil, err
+		return emptyDesc, err
 	}
 	if err != nil {
-		return nil, err
+		return emptyDesc, err
 	}
 
-	resp := &diff.ApplyResponse{
-		Applied: &descriptor.Descriptor{
-			MediaType: ocispec.MediaTypeImageLayer,
-			Digest:    digester.Digest(),
-			Size_:     rc.c,
-		},
+	resp := ocispec.Descriptor{
+		MediaType: ocispec.MediaTypeImageLayer,
+		Digest:    digest.Digest(checkSum),
+		Size:      rc.c,
 	}
 
 	logrus.Infof("Returning response: %q", resp)
@@ -104,61 +91,40 @@ func (vd *VicDiffer) Apply(ctx context.Context, er *diff.ApplyRequest) (*diff.Ap
 	return resp, nil
 }
 
-func (vd *VicDiffer) Diff(ctx context.Context, dr *diff.DiffRequest) (*diff.DiffResponse, error) {
-	return nil, errors.New("Snapshotter diff is not implemented")
+func (vd *VicDiffer) DiffMounts(ctx context.Context, lower, upper []mount.Mount, media, ref string) (ocispec.Descriptor, error) {
+	return ocispec.Descriptor{}, errors.New("Snapshotter diff is not implemented")
 }
 
-func (vd *VicDiffer) writeImage(ctx context.Context, data io.Reader, sum string, m *VicMount) (*models.Image, error) {
-	imgParams := storage.NewWriteImageParamsWithContext(ctx).
+func (vd *VicDiffer) writeImage(ctx context.Context, data io.Reader, sum string, m *VicMount) (string, error) {
+	params := storage.NewUnpackImageParamsWithContext(ctx).
 		WithImageID(m.current).
-		WithParentID(m.parent).
 		WithStoreName(vd.storageName).
+		WithParentID(m.parent).
 		WithMetadatakey(swag.String("metaData")).
 		WithMetadataval(swag.String("")).
-		WithImageFile(ioutil.NopCloser(data)).
-		WithSum(sum)
-	r, err := vd.plClient.Storage.WriteImage(imgParams)
+		WithImageFile(ioutil.NopCloser(data))
+
+	r, err := vd.plClient.Storage.UnpackImage(params)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
 	return r.Payload, nil
 }
 
-func parseMount(mountSrc string) (*VicMount, error) {
-	parts := strings.Split(mountSrc, "/")
+func parseMount(m mount.Mount) (*VicMount, error) {
+	mountSrc := m.Source
+	parts := strings.Split(m.Source, "/")
 	if len(parts) != 3 {
 		return nil, fmt.Errorf("Invalid source point: %s", mountSrc)
 	}
 	if parts[0] != "view" && parts[0] != "img" {
 		return nil, fmt.Errorf("Invalid mount type: %s", mountSrc)
 	}
+
 	return &VicMount{
 		parent:  parts[1],
 		current: parts[2],
 	}, nil
-}
-
-func toMounts(apim []*mounttypes.Mount) []*VicMount {
-	mounts := make([]*VicMount, len(apim))
-	for i, m := range apim {
-		vm, err := parseMount(m.Source)
-		if err != nil {
-			return nil
-		}
-		vm.target = m.Target
-		vm.fs = m.Type
-		vm.options = m.Options
-		mounts[i] = vm
-	}
-	return mounts
-}
-
-func toDescriptor(d *descriptor.Descriptor) ocispec.Descriptor {
-	return ocispec.Descriptor{
-		MediaType: d.MediaType,
-		Digest:    d.Digest,
-		Size:      d.Size_,
-	}
 }
 
 type readCounter struct {

@@ -25,6 +25,34 @@ type Client struct {
 }
 
 /*
+CommitImage Commit image
+*/
+func (a *Client) CommitImage(params *CommitImageParams) (*CommitImageCreated, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewCommitImageParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "CommitImage",
+		Method:             "PUT",
+		PathPattern:        "/snapshot/{store_name}",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json", "application/octet-stream"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &CommitImageReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*CommitImageCreated), nil
+
+}
+
+/*
 CreateImageStore creates an image store
 
 Creates a location to store images
@@ -261,6 +289,34 @@ func (a *Client) ListVolumes(params *ListVolumesParams) (*ListVolumesOK, error) 
 }
 
 /*
+RemoveImage Delete image layer
+*/
+func (a *Client) RemoveImage(params *RemoveImageParams) (*RemoveImageCreated, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewRemoveImageParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "RemoveImage",
+		Method:             "DELETE",
+		PathPattern:        "/snapshot/{store_name}",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &RemoveImageReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*RemoveImageCreated), nil
+
+}
+
+/*
 RemoveVolume removes a volume
 */
 func (a *Client) RemoveVolume(params *RemoveVolumeParams) (*RemoveVolumeOK, error) {
@@ -285,6 +341,36 @@ func (a *Client) RemoveVolume(params *RemoveVolumeParams) (*RemoveVolumeOK, erro
 		return nil, err
 	}
 	return result.(*RemoveVolumeOK), nil
+
+}
+
+/*
+UnpackImage creates a new image layer not available for use
+
+Creates a new image layer in an image store that is not available for use
+*/
+func (a *Client) UnpackImage(params *UnpackImageParams) (*UnpackImageCreated, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewUnpackImageParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "UnpackImage",
+		Method:             "POST",
+		PathPattern:        "/snapshot/{store_name}",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/octet-stream"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &UnpackImageReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*UnpackImageCreated), nil
 
 }
 
