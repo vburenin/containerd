@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/containerd/console"
@@ -376,4 +377,11 @@ func (p *VicTask) CloseStdin(ctx context.Context, pid uint32) error {
 
 func (p *VicTask) Checkpoint(context.Context, plugin.CheckpointOpts) error {
 	return fmt.Errorf("Check points are not supported yet")
+}
+
+func (p *VicTask) DeleteProcess(context.Context, uint32) (*plugin.Exit, error) {
+	return &plugin.Exit{
+		Status:    0,
+		Timestamp: time.Now(),
+	}, nil
 }

@@ -69,6 +69,7 @@ func (vs *VicSnap) createStorage() {
 	is := models.ImageStore{
 		Name: vs.storageName,
 	}
+
 	r, err := vs.plClient.Storage.CreateImageStore(
 		storage.NewCreateImageStoreParamsWithContext(context.TODO()).WithBody(&is),
 	)

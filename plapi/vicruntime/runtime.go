@@ -3,10 +3,13 @@ package vicruntime
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
+
+	"sync"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/containerd/containerd/api/services/shim"
@@ -24,6 +27,11 @@ const (
 	configFilename = "config.json"
 )
 
+var (
+	ErrTaskNotExists     = errors.New("task does not exist")
+	ErrTaskAlreadyExists = errors.New("task already exists")
+)
+
 func init() {
 	plugin.Register(runtimeName, &plugin.Registration{
 		Type:   plugin.RuntimePlugin,
@@ -34,11 +42,13 @@ func init() {
 
 type Runtime struct {
 	root string
+	mu   sync.Mutex
 
 	events        chan *plugin.Event
 	pl            *client.PortLayer
 	eventsContext context.Context
 	eventsCancel  func()
+	tasks         map[string]plugin.Task
 }
 
 var _ plugin.Runtime = &Runtime{}
@@ -60,12 +70,44 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 		eventsCancel:  cancel,
 		pl:            PortLayerClient(cfg.PortlayerAddress),
 	}
+
+	if err := r.updateContainerList(ic.Context); err != nil {
+		return nil, err
+	}
+
 	ic.Monitor.Events(r.events)
 
 	return r, nil
 }
 
+func (r *Runtime) updateContainerList(ctx context.Context) error {
+	logrus.Debugf("Refreshing running tasks list")
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	params := containers.NewGetContainerListParamsWithContext(ctx).WithAll(swag.Bool(true))
+
+	cl, err := r.pl.Containers.GetContainerList(params)
+	if err != nil {
+		return err
+	}
+	logrus.Debugf("Discovered %d tasks", len(cl.Payload))
+	r.tasks = make(map[string]plugin.Task, len(cl.Payload))
+	for _, c := range cl.Payload {
+		r.tasks[c.ContainerConfig.ContainerID] = RestoreVicContaner(ctx, r.pl, r.root, c)
+	}
+	return nil
+}
+
 func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts) (plugin.Task, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, ok := r.tasks[id]; ok {
+		return nil, ErrTaskAlreadyExists
+	}
+
 	logrus.Debugf("Starting runtime for %s. Options: %q", id, opts)
 	path, err := r.newBundle(id, opts.Spec)
 	if err != nil {
@@ -81,21 +123,24 @@ func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts)
 	return s, err
 }
 
+func (r *Runtime) Get(ctx context.Context, id string) (plugin.Task, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	t, ok := r.tasks[id]
+	if !ok {
+		return nil, ErrTaskNotExists
+	}
+	return t, nil
+}
+
 func (r *Runtime) Tasks(ctx context.Context) ([]plugin.Task, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 
-	var o []plugin.Task
-
-	params := containers.NewGetContainerListParams().WithAll(swag.Bool(true))
-
-	cl, err := r.pl.Containers.GetContainerList(params)
-	if err != nil {
-		return nil, err
+	o := make([]plugin.Task, 0, len(r.tasks))
+	for _, t := range r.tasks {
+		o = append(o, t)
 	}
-
-	for _, c := range cl.Payload {
-		o = append(o, RestoreVicContaner(ctx, r.pl, r.root, c))
-	}
-
 	return o, nil
 }
 
