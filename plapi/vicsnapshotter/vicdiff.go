@@ -23,17 +23,14 @@ import (
 )
 
 func init() {
-	plugin.Register("diff-vic", &plugin.Registration{
-		Type: plugin.DiffPlugin,
-		Init: func(ic *plugin.InitContext) (interface{}, error) {
-			cfg := ic.Config.(*vicconfig.Config)
-			return &VicDiffer{
-				store:       ic.Content,
-				plClient:    vicruntime.PortLayerClient(cfg.PortlayerAddress),
-				storageName: "containerd-storage",
-			}, nil
-		},
+	plugin.Register(&plugin.Registration{
+		ID:     "diff-vic",
+		Type:   plugin.DiffPlugin,
+		Init:   NewVicDiffer,
 		Config: vicconfig.DefaultConfig(),
+		Requires: []plugin.PluginType{
+			plugin.ContentPlugin,
+		},
 	})
 }
 
@@ -44,6 +41,22 @@ type VicDiffer struct {
 }
 
 var emptyDesc = ocispec.Descriptor{}
+
+func NewVicDiffer(ic *plugin.InitContext) (interface{}, error) {
+	cfg := ic.Config.(*vicconfig.Config)
+	c, err := ic.Get(plugin.ContentPlugin)
+	if err != nil {
+		return nil, err
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &VicDiffer{
+		store:       c.(content.Store),
+		plClient:    vicruntime.PortLayerClient(cfg.PortlayerAddress),
+		storageName: "containerd-storage",
+	}, nil
+}
 
 func (vd *VicDiffer) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []mount.Mount) (ocispec.Descriptor, error) {
 

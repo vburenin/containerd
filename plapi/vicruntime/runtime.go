@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"time"
-
 	"sync"
+	"time"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/containerd/containerd/api/services/shim"
@@ -30,13 +30,18 @@ const (
 var (
 	ErrTaskNotExists     = errors.New("task does not exist")
 	ErrTaskAlreadyExists = errors.New("task already exists")
+	pluginID             = fmt.Sprintf("%s.%s", plugin.RuntimePlugin, "vmware-linux")
 )
 
 func init() {
-	plugin.Register(runtimeName, &plugin.Registration{
+	plugin.Register(&plugin.Registration{
+		ID:     "vmware-linux",
 		Type:   plugin.RuntimePlugin,
 		Init:   New,
 		Config: vicconfig.DefaultConfig(),
+		Requires: []plugin.PluginType{
+			plugin.TaskMonitorPlugin,
+		},
 	})
 }
 
@@ -49,13 +54,18 @@ type Runtime struct {
 	eventsContext context.Context
 	eventsCancel  func()
 	tasks         map[string]plugin.Task
+	monitor       plugin.TaskMonitor
 }
 
 var _ plugin.Runtime = &Runtime{}
 
 func New(ic *plugin.InitContext) (interface{}, error) {
-	path := filepath.Join(ic.State, runtimeName)
-	if err := os.MkdirAll(path, 0700); err != nil {
+	if err := os.MkdirAll(ic.Root, 0700); err != nil {
+		return nil, err
+	}
+
+	monitor, err := ic.Get(plugin.TaskMonitorPlugin)
+	if err != nil {
 		return nil, err
 	}
 
@@ -64,18 +74,19 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 
 	c, cancel := context.WithCancel(ic.Context)
 	r := &Runtime{
-		root:          path,
+		root:          ic.Root,
 		events:        make(chan *plugin.Event, 2048),
 		eventsContext: c,
 		eventsCancel:  cancel,
 		pl:            PortLayerClient(cfg.PortlayerAddress),
+		monitor:       monitor.(plugin.TaskMonitor),
 	}
 
 	if err := r.updateContainerList(ic.Context); err != nil {
 		return nil, err
 	}
 
-	ic.Monitor.Events(r.events)
+	r.monitor.Events(r.events)
 
 	return r, nil
 }
@@ -98,6 +109,10 @@ func (r *Runtime) updateContainerList(ctx context.Context) error {
 		r.tasks[c.ContainerConfig.ContainerID] = RestoreVicContaner(ctx, r.pl, r.root, c)
 	}
 	return nil
+}
+
+func (r *Runtime) ID() string {
+	return pluginID
 }
 
 func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts) (plugin.Task, error) {

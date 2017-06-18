@@ -1,5 +1,5 @@
-snapshotter="vic"
-differ="vic"
+snapshotter="io.containerd.snapshotter.v1.snapshot-vic"
+differ="io.containerd.differ.v1.diff-vic"
 [plugins]
   [vic]
   portlayer_address="127.0.0.1:2377"

@@ -19,12 +19,12 @@ import (
 )
 
 func init() {
-	plugin.Register("snapshot-vic", &plugin.Registration{
-		Type: plugin.SnapshotPlugin,
-		Init: func(ic *plugin.InitContext) (interface{}, error) {
-			return NewVicSnap(ic), nil
-		},
-		Config: vicconfig.DefaultConfig(),
+	plugin.Register(&plugin.Registration{
+		ID:       "snapshot-vic",
+		Type:     plugin.SnapshotPlugin,
+		Init:     NewVicSnap,
+		Config:   vicconfig.DefaultConfig(),
+		Requires: []plugin.PluginType{},
 	})
 }
 
@@ -49,7 +49,7 @@ type VicSnap struct {
 	mu sync.Mutex
 }
 
-func NewVicSnap(ic *plugin.InitContext) *VicSnap {
+func NewVicSnap(ic *plugin.InitContext) (interface{}, error) {
 	cfg := ic.Config.(*vicconfig.Config)
 	vs := &VicSnap{
 		storageName:    "containerd-storage",
@@ -59,13 +59,15 @@ func NewVicSnap(ic *plugin.InitContext) *VicSnap {
 		active:         make(map[string][]mount.Mount),
 		mounts:         make(map[string]*VicMount),
 	}
-	vs.createStorage()
-	return vs
+	if err := vs.createStorage(); err != nil {
+		return nil, err
+	}
+	return vs, nil
 }
 
 var _ snapshot.Snapshotter = &VicSnap{}
 
-func (vs *VicSnap) createStorage() {
+func (vs *VicSnap) createStorage() error {
 	is := models.ImageStore{
 		Name: vs.storageName,
 	}
@@ -74,11 +76,14 @@ func (vs *VicSnap) createStorage() {
 		storage.NewCreateImageStoreParamsWithContext(context.TODO()).WithBody(&is),
 	)
 	if err != nil {
-		logrus.Warnf("Storage is not created: %s", err)
-		return
+		if _, ok := err.(*storage.CreateImageStoreConflict); !ok {
+			return err
+		}
+	} else {
+		logrus.Debugf("Storage has been created: %s", r.Payload.URL)
 	}
-	logrus.Debugf("Storage has been created: %s", r.Payload.URL)
 
+	return nil
 }
 
 func (vs *VicSnap) Stat(ctx context.Context, key string) (snapshot.Info, error) {
