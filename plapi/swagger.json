@@ -441,6 +441,45 @@
 			}
 		},
 		"/snapshot/{store_name}": {
+			"get": {
+				"description": "List all available images",
+				"operationId": "ListAllImages",
+				"tags": [
+					"storage"
+				],
+				"parameters": [
+					{
+						"name": "store_name",
+						"type": "string",
+						"in": "path",
+						"required": true
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK",
+						"schema": {
+							"type": "array",
+							"items": {
+								"$ref": "#/definitions/Image"
+							}
+						}
+					},
+					"404": {
+						"description": "Not found",
+						"schema": {
+							"$ref": "#/definitions/Error"
+						}
+					},
+					"default": {
+						"description": "error",
+						"schema": {
+							"$ref": "#/definitions/Error"
+						}
+					}
+				}
+			},
+
 			"delete": {
 				"description": "Delete image layer",
 				"tags": [

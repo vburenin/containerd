@@ -231,6 +231,34 @@ func (a *Client) GetVolume(params *GetVolumeParams) (*GetVolumeOK, error) {
 }
 
 /*
+ListAllImages List all available images
+*/
+func (a *Client) ListAllImages(params *ListAllImagesParams) (*ListAllImagesOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewListAllImagesParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "ListAllImages",
+		Method:             "GET",
+		PathPattern:        "/snapshot/{store_name}",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &ListAllImagesReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*ListAllImagesOK), nil
+
+}
+
+/*
 ListImages retrieves a list of images in an image store
 
 Retrieves a list of images given a list of image IDs, or all images in the image store if no param is passed.

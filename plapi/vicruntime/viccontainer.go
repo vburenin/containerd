@@ -2,24 +2,24 @@ package vicruntime
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/containerd/console"
-	"github.com/containerd/containerd/api/types/mount"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/containers"
 	"github.com/containerd/containerd/plapi/client/interaction"
 	"github.com/containerd/containerd/plapi/client/logging"
+	"github.com/containerd/containerd/plapi/client/scopes"
+	"github.com/containerd/containerd/plapi/client/tasks"
 	"github.com/containerd/containerd/plapi/models"
+	"github.com/containerd/containerd/plapi/mounts"
 	"github.com/containerd/containerd/plugin"
-	"github.com/containerd/go-runc"
-	"github.com/go-openapi/swag"
-	"google.golang.org/grpc"
+	specs "github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/pkg/errors"
 )
 
 type State struct {
@@ -36,280 +36,324 @@ func (s State) Status() plugin.Status {
 }
 
 type VicTask struct {
-	client   *client.PortLayer
-	bundle   string
-	storage  string
-	imageID  string
-	root     string
-	shimSock string
+	client *client.PortLayer
+	comm   *plugin.IO
+	con    console.Console
 
-	comm *plugin.IO
-	con  console.Console
+	tty bool
+	mu  sync.Mutex
 
-	tty      bool
-	statusMu sync.Mutex
-
-	server *grpc.Server
 	events chan *plugin.Event
 
-	mounts      []*mount.Mount
 	id          string
 	portLayerId string
 }
 
 const (
-	AnnotationStdErrKey    = "containerd.stderr"
-	AnnotationStdOutKey    = "containerd.stdout"
-	AnnotationStdInKey     = "containerd.stdin"
-	AnnotationImageID      = "containerd.img_id"
-	AnnotationStorageName  = "containerd.storage_name"
-	AnnotationContainerdID = "containerd.id"
+	AnnotationStdErrKey     = "containerd.stderr"
+	AnnotationStdOutKey     = "containerd.stdout"
+	AnnotationStdInKey      = "containerd.stdin"
+	AnnotationImageID       = "containerd.img_id"
+	AnnotationStorageName   = "containerd.storage_name"
+	AnnotationContainerdID  = "containerd.id"
+	AnnotationContainerSpec = "containerd.spec"
 )
 
-func NewVicTask(ctx context.Context, portLayer *client.PortLayer,
-	root, id string, opts plugin.CreateOpts) (plugin.Task, error) {
+func loadSpec(specBin []byte) (*specs.Spec, error) {
+	var spec specs.Spec
+	if err := json.Unmarshal(specBin, &spec); err != nil {
+		return nil, errors.Wrap(err, "failed to unmarshal oci spec")
+	}
+	return &spec, nil
+}
 
-	c := &VicTask{
-		client: portLayer,
-		comm:   &opts.IO,
-		bundle: filepath.Join(root, id),
-		id:     id,
+type VicTasker struct {
+	mu     sync.Mutex
+	main   *VicProc
+	other  map[int32]*VicTask
+	events chan *plugin.Event
+	pl     *client.PortLayer
+	spec   *specs.Spec
+
+	id      string
+	vid     string
+	root    string
+	storage string
+	imageID string
+}
+
+func NewVicTasker(ctx context.Context, pl *client.PortLayer, events chan *plugin.Event,
+	storage, root, id string) *VicTasker {
+	return &VicTasker{
+		main:    nil,
+		other:   make(map[int32]*VicTask),
+		events:  events,
+		id:      id,
+		storage: storage,
+		root:    root,
+		pl:      pl,
+	}
+}
+
+func (vt *VicTasker) Create(ctx context.Context, opts plugin.CreateOpts) error {
+	spec, err := loadSpec(opts.Spec)
+
+	if err != nil {
+		return errors.Wrap(err, "Could not decode spec")
 	}
 
-	for _, v := range c.mounts {
-		if v.Target == "" || v.Target == "/" {
-			imagePath := strings.SplitN(v.Source, "/", -1)
-			if len(imagePath) < 2 {
-				continue
-			}
-			c.storage = imagePath[len(imagePath)-2]
-			c.imageID = imagePath[len(imagePath)-1]
-			break
+	vt.spec = spec
+
+	for _, v := range opts.Rootfs {
+		log.G(ctx).Infof("Received mount: %#v", v)
+		vmnt, err := mounts.ParseMountSource(v.Source)
+		if err != nil {
+			errors.Wrap(err, "Could not parse image mount")
 		}
+		vt.imageID = vmnt.Parent
+		break
 	}
-
-	if c.imageID == "" || c.storage == "" {
-		return nil, fmt.Errorf("No VM image id has been found")
+	if vt.imageID == "" {
+		return errors.New("No VM image id has been found")
 	}
-
-	_ = `
-Mar  9 2017 10:37:00.655Z INFO  Create params. Name: %!s(*string=<nil>): {
-   "annotations": {
-     "containerd.img_id": "c40e708042c6a113e5827705cf9ace0377fae60cf9ae7a80ea8502d6460d87c6",
-     "containerd.stderr": "/tmp/ctr/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-676402324/stderr",
-     "containerd.stdin": "/tmp/ctr/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-676402324/stdin",
-     "containerd.stdout": "/tmp/ctr/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-676402324/stdout",
-     "containerd.storage_name": "564df9f8-953e-0c9d-96a4-036e824e03cb"
-   },
-   "args": null,
-   "attach": true,
-   "env": [
-     "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
-     "TERM=xterm"
-   ],
-   "image": "c40e708042c6a113e5827705cf9ace0377fae60cf9ae7a80ea8502d6460d87c6",
-   "imageStore": {
-     "name": "564df9f8-953e-0c9d-96a4-036e824e03cb"
-   },
-   "memoryMB": 2048,
-   "name": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-   "numCPUs": 2,
-   "openStdin": true,
-   "path": "/bin/bash",
-   "repoName": "ubuntu",
-   "stopSignal": "TERM",
-   "tty": true,
-   "workingDir": "/"
- }
- }`
 
 	ccc := &models.ContainerCreateConfig{
+		Name: vt.id,
+
 		NumCpus:  2,
 		MemoryMB: 2048,
 
-		Image:    c.imageID, // request
-		RepoName: "ubuntu",
+		Image:      vt.imageID, // request
+		Layer:      vt.imageID,
+		ImageStore: &models.ImageStore{Name: vt.storage},
+		RepoName:   "ubuntu",
 
-		Name:            id,
-		ImageStore:      &models.ImageStore{Name: c.storage},
-		NetworkDisabled: false,
+		NetworkDisabled: true,
 		Annotations: map[string]string{
-			AnnotationStdInKey:     c.comm.Stdin,
-			AnnotationStdOutKey:    c.comm.Stdout,
-			AnnotationStdErrKey:    c.comm.Stderr,
-			AnnotationImageID:      c.imageID,
-			AnnotationStorageName:  c.storage,
-			AnnotationContainerdID: id,
+			AnnotationStdInKey:      opts.IO.Stdin,
+			AnnotationStdOutKey:     opts.IO.Stdout,
+			AnnotationStdErrKey:     opts.IO.Stderr,
+			AnnotationImageID:       vt.imageID,
+			AnnotationStorageName:   vt.storage,
+			AnnotationContainerdID:  vt.id,
+			AnnotationContainerSpec: string(opts.Spec),
 		},
 
 		// Layer
 
 	}
-	logrus.Debugf("Creating new container: %s", id)
-	logrus.Debugf("%#v", ccc)
+	log.G(ctx).Debugf("Creating new container: %s", vt.id)
+	log.G(ctx).Debugf("%#v", ccc)
 	createParams := containers.NewCreateParamsWithContext(ctx).WithCreateConfig(ccc)
 
-	r, err := c.client.Containers.Create(createParams)
+	r, err := vt.pl.Containers.Create(createParams)
 	if err != nil {
-		logrus.Warningf("Could not create container: %s", err)
-		return nil, err
+		log.G(ctx).Warningf("Could not create container: %s", err)
+		return err
 	}
 
+	vt.vid = r.Payload.ID
 	handle := r.Payload.Handle
 
-	r1, err := c.client.Logging.LoggingJoin(
+	proc := spec.Process
+	cfg := &models.TaskJoinConfig{
+		ID:         vt.vid,
+		Env:        proc.Env,
+		WorkingDir: proc.Cwd,
+		User:       proc.User.Username,
+		Tty:        opts.IO.Terminal,
+		OpenStdin:  opts.IO.Stdin != "",
+		Attach:     true,
+		Handle:     handle,
+	}
+
+	if len(proc.Args) > 0 {
+		cfg.Path = proc.Args[0]
+		cfg.Args = proc.Args[1:]
+	}
+
+	taskResp, err := vt.pl.Tasks.Join(tasks.NewJoinParamsWithContext(ctx).WithConfig(cfg))
+	if err != nil {
+		return err
+	}
+
+	handle = taskResp.Payload.Handle.(string)
+
+	bindResp, err := vt.pl.Tasks.Bind(tasks.NewBindParamsWithContext(ctx).WithConfig(&models.TaskBindConfig{
+		Handle: handle,
+		ID:     vt.vid,
+	}))
+	if err != nil {
+		return err
+	}
+	handle = bindResp.Payload.Handle.(string)
+
+	r1, err := vt.pl.Logging.LoggingJoin(
 		logging.NewLoggingJoinParamsWithContext(ctx).WithConfig(
 			&models.LoggingJoinConfig{
 				Handle: handle,
 			}))
+
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	handle = r1.Payload.Handle.(string)
 
-	r2, err := c.client.Interaction.InteractionJoin(
+	r2, err := vt.pl.Interaction.InteractionJoin(
 		interaction.NewInteractionJoinParamsWithContext(ctx).WithConfig(
 			&models.InteractionJoinConfig{
 				Handle: handle,
 			}))
 
 	if err != nil {
-		return nil, err
+		return err
 	}
+
 	handle = r2.Payload.Handle.(string)
 
-	c.commitHandle(ctx, handle)
-	c.portLayerId = r.Payload.ID
+	CommitHandle(ctx, vt.pl, handle)
 
-	if err := c.runIOServers(ctx); err != nil {
-		return nil, err
+	vt.events <- &plugin.Event{
+		ID:        vt.id,
+		Runtime:   runtimeName,
+		Type:      plugin.CreateEvent,
+		Timestamp: time.Now(),
+		Pid:       1,
 	}
 
-	return c, nil
+	vicProc, err := NewVicProc(ctx, vt.pl, vt.root, opts)
+	if err != nil {
+		return err
+	}
+
+	vt.main = vicProc
+
+	return nil
 }
 
-func RestoreVicContaner(ctx context.Context, portlayer *client.PortLayer,
-	root string, ci *models.ContainerInfo) plugin.Task {
-
+func (vt *VicTasker) Restore(ctx context.Context, ci *models.ContainerInfo) error {
 	cfg := ci.ContainerConfig
+	vt.storage = cfg.Annotations[AnnotationStorageName]
+	vt.imageID = cfg.Annotations[AnnotationImageID]
+
+	vt.vid = cfg.ContainerID
+	vt.id = cfg.Annotations[AnnotationContainerdID]
+
 	c := &VicTask{
-		root:   root,
-		client: portlayer,
 		comm: &plugin.IO{
 			Stdout:   cfg.Annotations[AnnotationStdOutKey],
 			Stdin:    cfg.Annotations[AnnotationStdOutKey],
 			Stderr:   cfg.Annotations[AnnotationStdErrKey],
 			Terminal: cfg.Tty != nil && *cfg.Tty,
 		},
-		portLayerId: cfg.ContainerID,
-		bundle:      cfg.LayerID,
-		imageID:     cfg.Annotations[AnnotationImageID],
-		storage:     cfg.Annotations[AnnotationStorageName],
-		id:          cfg.Annotations[AnnotationContainerdID],
 	}
 
 	if c.id == "" {
 		c.id = c.portLayerId
 	}
-
-	return c
+	return nil
 }
 
-func (p *VicTask) getHandle(ctx context.Context) (string, error) {
-	r, err := p.client.Containers.Get(containers.NewGetParamsWithContext(ctx).WithID(p.portLayerId))
-	if err != nil {
-		logrus.Warningf("Could not get handle for container: %s", err)
-		return "", fmt.Errorf("Could not get container handle: %s", p.id)
-	}
-
-	return r.Payload, nil
-}
-
-func (p *VicTask) commitHandle(ctx context.Context, h string) error {
-	logrus.Debugf("Committing handle: %s", h)
-
-	commitParams := containers.NewCommitParamsWithContext(ctx).WithHandle(h).WithWaitTime(swag.Int32(5))
-	_, err := p.client.Containers.Commit(commitParams)
-	if err != nil {
-		logrus.Warningf("Could not commit handle %s: %s", h, err)
-	}
-	return err
-}
-
-func (p *VicTask) runIOServers(ctx context.Context) error {
-	var socket *runc.Socket
-	var err error
-
-	if p.tty {
-		if socket, err = runc.NewConsoleSocket(filepath.Join(p.root, p.id, "pty.sock")); err != nil {
-			return err
-		}
-		con, err := socket.ReceiveMaster()
-		if err != nil {
-			return err
-		}
-
-		p.con = con
-
-		go func() {
-			stdInParams := interaction.NewContainerSetStdinParamsWithContext(ctx).WithID("tty-in")
-			stdInParams.WithRawStream(con)
-
-			_, e := p.client.Interaction.ContainerSetStdin(stdInParams)
-			if e != nil {
-				logrus.Errorf("Could not setup stdin channel: %s", err)
-			}
-		}()
-
-		go func() {
-			stdOutParams := interaction.NewContainerGetStdoutParamsWithContext(ctx).WithID("tty-out")
-			_, e := p.client.Interaction.ContainerGetStdout(stdOutParams, con)
-			if e != nil {
-				logrus.Errorf("Could not setup stdout channel: %s", err)
-			}
-		}()
-	}
+func (vt *VicTasker) runIOServers(ctx context.Context) error {
+	//var socket *runc.Socket
+	//var err error
+	//
+	//if p.tty {
+	//	if socket, err = runc.NewConsoleSocket(filepath.Join(p.root, p.id, "pty.sock")); err != nil {
+	//		return err
+	//	}
+	//	con, err := socket.ReceiveMaster()
+	//	if err != nil {
+	//		return err
+	//	}
+	//
+	//	p.con = con
+	//
+	//	go func() {
+	//		stdInParams := interaction.NewContainerSetStdinParamsWithContext(ctx).WithID("tty-in")
+	//		stdInParams.WithRawStream(con)
+	//
+	//		_, e := p.client.Interaction.ContainerSetStdin(stdInParams)
+	//		if e != nil {
+	//			log.G(ctx).Errorf("Could not setup stdin channel: %s", err)
+	//		}
+	//	}()
+	//
+	//	go func() {
+	//		stdOutParams := interaction.NewContainerGetStdoutParamsWithContext(ctx).WithID("tty-out")
+	//		_, e := p.client.Interaction.ContainerGetStdout(stdOutParams, con)
+	//		if e != nil {
+	//			log.G(ctx).Errorf("Could not setup stdout channel: %s", err)
+	//		}
+	//	}()
+	//}
 
 	return nil
 }
 
-func (p *VicTask) Info() plugin.TaskInfo {
+func (vt *VicTasker) Info() plugin.TaskInfo {
 	return plugin.TaskInfo{
-		ID:          p.id,
-		ContainerID: p.id,
+		ID:          vt.id,
+		ContainerID: vt.id,
 		Runtime:     runtimeName,
 		Spec:        nil,
 	}
 }
 
-func (p *VicTask) Start(ctx context.Context) error {
-	h, err := p.getHandle(ctx)
+func (vt *VicTasker) Start(ctx context.Context) error {
+	vt.mu.Lock()
+	handle, err := GetHandle(ctx, vt.pl, vt.vid)
 	if err != nil {
-		return fmt.Errorf("Container not found: %s", p.id)
+		return fmt.Errorf("Container not found: %s", vt.id)
 	}
 
-	logrus.Debugf("Starting container %s with handle %s", p.id, h)
-	params := containers.NewStateChangeParamsWithContext(ctx)
-	params.WithState("RUNNING").WithHandle(h)
-	_, err = plClient.Containers.StateChange(params)
+	bindResp, err := vt.pl.Scopes.BindContainer(scopes.NewBindContainerParamsWithContext(ctx).WithHandle(handle))
 	if err != nil {
 		return err
 	}
 
-	return p.commitHandle(ctx, h)
+	handle = bindResp.Payload.Handle
+
+	log.G(ctx).Debugf("Starting container %s with handle %s", vt.id, handle)
+	params := containers.NewStateChangeParamsWithContext(ctx).
+		WithState("RUNNING").
+		WithHandle(handle)
+
+	stateResp, err := vt.pl.Containers.StateChange(params)
+	if err != nil {
+		return err
+	}
+
+	// resp.Payload is a returned new handle.
+	if err = CommitHandle(ctx, vt.pl, stateResp.Payload); err != nil {
+		return err
+	}
+
+	log.G(ctx).Infof("Container %s has started", vt.vid)
+
+	vt.events <- &plugin.Event{
+		Pid:       1,
+		ID:        vt.id,
+		Timestamp: time.Now(),
+		Type:      plugin.StartEvent,
+		Runtime:   runtimeName,
+	}
+	return nil
 }
 
-func (p *VicTask) State(ctx context.Context) (plugin.State, error) {
-	p.statusMu.Lock()
-	defer p.statusMu.Unlock()
+func (vt *VicTasker) State(ctx context.Context) (plugin.State, error) {
+	l := log.G(ctx)
+	l.Debugf("State requested for container: %s", vt.id)
+	vt.mu.Lock()
+	defer vt.mu.Unlock()
 
-	h, err := p.getHandle(ctx)
+	h, err := GetHandle(ctx, vt.pl, vt.vid)
 	if err != nil {
 		return plugin.State{}, err
 	}
 
-	r, err := p.client.Containers.GetState(containers.NewGetStateParamsWithContext(ctx).WithHandle(h))
+	r, err := vt.pl.Containers.GetState(containers.NewGetStateParamsWithContext(ctx).WithHandle(h))
 	if err != nil {
 		return plugin.State{}, err
 	}
@@ -326,60 +370,57 @@ func (p *VicTask) State(ctx context.Context) (plugin.State, error) {
 		status = plugin.Status(0)
 	}
 
-	//type State struct {
-	//	// Status is the current status of the container
-	//	Status
-	//	// Pid is the main process id for the container
-	//	Pid      uint32
-	//	Stdin    string
-	//	Stdout   string
-	//	Stderr   string
-	//	Terminal bool
-	//}
+	l.Debugf("Container %s state: %s", vt.id, r.Payload.State)
 
 	return plugin.State{
 		Status:   status,
 		Pid:      1,
-		Stdin:    p.comm.Stdin,
-		Stdout:   p.comm.Stdout,
-		Stderr:   p.comm.Stderr,
-		Terminal: p.tty,
+		Stdin:    vt.main.stdinPath,
+		Stdout:   vt.main.stdoutPath,
+		Stderr:   vt.main.stderrPath,
+		Terminal: vt.main.terminal,
 	}, nil
 }
 
-func (p *VicTask) Pause(ctx context.Context) error {
+func (vt *VicTasker) Pause(ctx context.Context) error {
+	log.G(ctx).Debugf("Pausing container: %s", vt.id)
 	return nil
 }
 
-func (p *VicTask) Resume(ctx context.Context) error {
+func (vt *VicTasker) Resume(ctx context.Context) error {
+	log.G(ctx).Debugf("Resuming container: %s", vt.id)
 	return nil
 }
 
-func (p *VicTask) Kill(ctx context.Context, signal, pid uint32, b bool) error {
+func (vt *VicTasker) Kill(ctx context.Context, signal, pid uint32, b bool) error {
+	log.G(ctx).Debugf("Sending signal %d to %d: %s", signal, pid, vt.id)
 	return nil
 }
 
-func (p *VicTask) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Process, error) {
+func (vt *VicTasker) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Process, error) {
 	return nil, fmt.Errorf("Exec is not implemented")
 }
 
-func (p *VicTask) Processes(ctx context.Context) ([]uint32, error) {
+func (vt *VicTasker) Processes(ctx context.Context) ([]uint32, error) {
 	return []uint32{1}, nil
 }
 
-func (p *VicTask) Pty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
+func (vt *VicTasker) Pty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
+	log.G(ctx).Debugf("PTY requested for %d: %s", pid, vt.id)
 	return nil
 }
 
-func (p *VicTask) CloseStdin(ctx context.Context, pid uint32) error {
+func (vt *VicTasker) CloseStdin(ctx context.Context, pid uint32) error {
+	log.G(ctx).Debugf("Closing STDIN for %d: %s", pid, vt.id)
 	return nil
 }
 
-func (p *VicTask) Checkpoint(context.Context, plugin.CheckpointOpts) error {
+func (vt *VicTasker) Checkpoint(ctx context.Context, opts plugin.CheckpointOpts) error {
 	return fmt.Errorf("Check points are not supported yet")
 }
 
-func (p *VicTask) DeleteProcess(context.Context, uint32) (*plugin.Exit, error) {
+func (vt *VicTasker) DeleteProcess(ctx context.Context, pid uint32) (*plugin.Exit, error) {
+	log.G(ctx).Debugf("Deliting process %d: %s", pid, vt.id)
 	return &plugin.Exit{
 		Status:    0,
 		Timestamp: time.Now(),

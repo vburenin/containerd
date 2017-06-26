@@ -1,29 +1,22 @@
 package vicruntime
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/Sirupsen/logrus"
-	"github.com/containerd/containerd/api/services/shim"
-	"github.com/containerd/containerd/api/types/task"
-	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plapi/client"
-	"github.com/containerd/containerd/plapi/client/containers"
 	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plugin"
-	"github.com/go-openapi/swag"
+	"github.com/pkg/errors"
 )
 
 const (
-	runtimeName    = "vic"
+	runtimeName    = "vmware-linux"
 	configFilename = "config.json"
 )
 
@@ -75,11 +68,12 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 	c, cancel := context.WithCancel(ic.Context)
 	r := &Runtime{
 		root:          ic.Root,
-		events:        make(chan *plugin.Event, 2048),
+		events:        make(chan *plugin.Event, 4096),
 		eventsContext: c,
 		eventsCancel:  cancel,
 		pl:            PortLayerClient(cfg.PortlayerAddress),
 		monitor:       monitor.(plugin.TaskMonitor),
+		tasks:         make(map[string]plugin.Task),
 	}
 
 	if err := r.updateContainerList(ic.Context); err != nil {
@@ -92,22 +86,22 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 }
 
 func (r *Runtime) updateContainerList(ctx context.Context) error {
-	logrus.Debugf("Refreshing running tasks list")
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	params := containers.NewGetContainerListParamsWithContext(ctx).WithAll(swag.Bool(true))
-
-	cl, err := r.pl.Containers.GetContainerList(params)
-	if err != nil {
-		return err
-	}
-	logrus.Debugf("Discovered %d tasks", len(cl.Payload))
-	r.tasks = make(map[string]plugin.Task, len(cl.Payload))
-	for _, c := range cl.Payload {
-		r.tasks[c.ContainerConfig.ContainerID] = RestoreVicContaner(ctx, r.pl, r.root, c)
-	}
+	//logrus.Debugf("Refreshing running tasks list")
+	//
+	//r.mu.Lock()
+	//defer r.mu.Unlock()
+	//
+	//params := containers.NewGetContainerListParamsWithContext(ctx).WithAll(swag.Bool(true))
+	//
+	//cl, err := r.pl.Containers.GetContainerList(params)
+	//if err != nil {
+	//	return err
+	//}
+	//logrus.Debugf("Discovered %d tasks", len(cl.Payload))
+	//r.tasks = make(map[string]plugin.Task, len(cl.Payload))
+	//for _, c := range cl.Payload {
+	//	r.tasks[c.ContainerConfig.ContainerID] = RestoreVicContaner(ctx, r.pl, r.root, c)
+	//}
 	return nil
 }
 
@@ -129,11 +123,15 @@ func (r *Runtime) Create(ctx context.Context, id string, opts plugin.CreateOpts)
 		return nil, err
 	}
 
-	s, err := NewVicTask(ctx, r.pl, r.root, id, opts)
-	if err != nil {
+	s := NewVicTasker(ctx, r.pl,
+		r.events, "containerd-storage", path, id)
+
+	if err := s.Create(ctx, opts); err != nil {
 		os.RemoveAll(path)
 		return nil, err
 	}
+
+	r.tasks[id] = s
 
 	return s, err
 }
@@ -170,51 +168,12 @@ func (r *Runtime) Events(ctx context.Context) <-chan *plugin.Event {
 	return r.events
 }
 
-func (r *Runtime) forward(events shim.Shim_EventsClient) {
-	for {
-		e, err := events.Recv()
-		if err != nil {
-			log.G(r.eventsContext).WithError(err).Error("get event from shim")
-			return
-		}
-		var et plugin.EventType
-		switch e.Type {
-		case task.Event_CREATE:
-			et = plugin.CreateEvent
-		case task.Event_EXEC_ADDED:
-			et = plugin.ExecAddEvent
-		case task.Event_EXIT:
-			et = plugin.ExitEvent
-		case task.Event_OOM:
-			et = plugin.OOMEvent
-		case task.Event_START:
-			et = plugin.StartEvent
-		}
-		r.events <- &plugin.Event{
-			Timestamp:  time.Now(),
-			Runtime:    runtimeName,
-			Type:       et,
-			Pid:        e.Pid,
-			ID:         e.ID,
-			ExitStatus: e.ExitStatus,
-		}
-	}
-}
-
 func (r *Runtime) newBundle(id string, spec []byte) (string, error) {
 	path := filepath.Join(r.root, id)
 	if err := os.Mkdir(path, 0700); err != nil {
 		return "", err
 	}
-	if err := os.Mkdir(filepath.Join(path, "rootfs"), 0700); err != nil {
-		return "", err
-	}
-	f, err := os.Create(filepath.Join(path, configFilename))
-	if err != nil {
-		return "", err
-	}
-	_, err = io.Copy(f, bytes.NewReader(spec))
-	return path, err
+	return path, nil
 }
 
 func (r *Runtime) deleteBundle(id string) error {

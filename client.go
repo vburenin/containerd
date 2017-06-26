@@ -6,7 +6,6 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"runtime"
 	"sync"
 	"time"
 
@@ -86,7 +85,7 @@ func New(address string, opts ...ClientOpt) (*Client, error) {
 	}
 	return &Client{
 		conn:    conn,
-		runtime: fmt.Sprintf("%s.%s", plugin.RuntimePlugin, runtime.GOOS),
+		runtime: fmt.Sprintf("%s.%s", plugin.RuntimePlugin, "vmware-linux"),
 	}, nil
 }
 

@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
@@ -28,23 +27,14 @@ func init() {
 	})
 }
 
-type VicMount struct {
-	parent   string
-	fs       string
-	current  string
-	snapType string
-	target   string
-	options  []string
-}
+
 
 type VicSnap struct {
-	storageName    string
-	plClient       *client.PortLayer
-	snapshots      map[string]snapshot.Info
-	parentChildMap map[string][]string
-	active         map[string][]mount.Mount
-	mounts         map[string]*VicMount
-	store          content.Store
+	storageName string
+	plClient    *client.PortLayer
+	snapshots   map[string]snapshot.Info
+	active      map[string][]mount.Mount
+	store       content.Store
 
 	mu sync.Mutex
 }
@@ -52,14 +42,15 @@ type VicSnap struct {
 func NewVicSnap(ic *plugin.InitContext) (interface{}, error) {
 	cfg := ic.Config.(*vicconfig.Config)
 	vs := &VicSnap{
-		storageName:    "containerd-storage",
-		plClient:       vicruntime.PortLayerClient(cfg.PortlayerAddress),
-		snapshots:      make(map[string]snapshot.Info),
-		parentChildMap: make(map[string][]string),
-		active:         make(map[string][]mount.Mount),
-		mounts:         make(map[string]*VicMount),
+		storageName: "containerd-storage",
+		plClient:    vicruntime.PortLayerClient(cfg.PortlayerAddress),
+		snapshots:   make(map[string]snapshot.Info),
+		active:      make(map[string][]mount.Mount),
 	}
-	if err := vs.createStorage(); err != nil {
+	if err := vs.createStorage(ic.Context); err != nil {
+		return nil, err
+	}
+	if err := vs.loadAvailableImages(ic.Context); err != nil {
 		return nil, err
 	}
 	return vs, nil
@@ -67,22 +58,49 @@ func NewVicSnap(ic *plugin.InitContext) (interface{}, error) {
 
 var _ snapshot.Snapshotter = &VicSnap{}
 
-func (vs *VicSnap) createStorage() error {
+func (vs *VicSnap) createStorage(ctx context.Context) error {
 	is := models.ImageStore{
 		Name: vs.storageName,
 	}
 
 	r, err := vs.plClient.Storage.CreateImageStore(
-		storage.NewCreateImageStoreParamsWithContext(context.TODO()).WithBody(&is),
+		storage.NewCreateImageStoreParamsWithContext(ctx).WithBody(&is),
 	)
 	if err != nil {
 		if _, ok := err.(*storage.CreateImageStoreConflict); !ok {
 			return err
 		}
 	} else {
-		logrus.Debugf("Storage has been created: %s", r.Payload.URL)
+		log.G(ctx).Debugf("Storage has been created: %s", r.Payload.URL)
 	}
 
+	return nil
+}
+
+func (vs *VicSnap) loadAvailableImages(ctx context.Context) error {
+	params := storage.NewListAllImagesParamsWithContext(ctx).WithStoreName(vs.storageName)
+	resp, err := vs.plClient.Storage.ListAllImages(params)
+	if err != nil {
+		return err
+	}
+	log.G(ctx).Infof("Found %d images", len(resp.Payload))
+	for _, img := range resp.Payload {
+		kind := snapshot.KindActive
+		if _, ok := img.Metadata["committed"]; ok {
+			kind = snapshot.KindCommitted
+		}
+		vs.snapshots[img.ID] = snapshot.Info{
+			Parent:   img.Metadata["parent"],
+			Name:     img.ID,
+			Readonly: false,
+			Kind:     snapshot.KindCommitted,
+		}
+		if kind == snapshot.KindActive {
+			vs.addActive("img", img.ID, img.Parent)
+		}
+
+		log.G(ctx).Debugf("Discovered image %#v", img)
+	}
 	return nil
 }
 
@@ -125,23 +143,7 @@ func (vs *VicSnap) Mounts(ctx context.Context, key string) ([]mount.Mount, error
 	return mounts, nil
 }
 
-func (vs *VicSnap) prepareSnapshot(snapType, key, parent string) ([]mount.Mount, error) {
-	logrus.Debugf("Preparing snapshot %s:%s/%s", snapType, parent, key)
-	vs.mu.Lock()
-	defer vs.mu.Unlock()
-
-	if _, ok := vs.snapshots[key]; ok {
-		return nil, snapshot.ErrSnapshotExist
-	}
-
-	if parent != "" {
-		if _, ok := vs.snapshots[parent]; !ok {
-			return nil, snapshot.ErrSnapshotNotExist
-		}
-	} else {
-		parent = "scratch"
-	}
-
+func (vs *VicSnap) addActive(snapType, key, parent string) []mount.Mount {
 	m := mount.Mount{
 		Options: []string{"rw"},
 		Type:    "ext4",
@@ -157,16 +159,39 @@ func (vs *VicSnap) prepareSnapshot(snapType, key, parent string) ([]mount.Mount,
 
 	mountList := []mount.Mount{m}
 	vs.active[key] = mountList
+	return mountList
+}
 
-	return mountList, nil
+func (vs *VicSnap) prepareSnapshot(ctx context.Context, snapType, key, parent string) ([]mount.Mount, error) {
+	log.G(ctx).Debugf("Preparing snapshot %s:%s/%s", snapType, parent, key)
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	if _, ok := vs.snapshots[key]; ok {
+		return nil, snapshot.ErrSnapshotExist
+	}
+
+	if parent != "" {
+		if p, ok := vs.snapshots[parent]; !ok {
+			return nil, snapshot.ErrSnapshotNotExist
+		} else {
+			if p.Kind == snapshot.KindActive {
+				return nil, snapshot.ErrSnapshotNotCommitted
+			}
+		}
+	} else {
+		parent = "scratch"
+	}
+
+	return vs.addActive(snapType, key, parent), nil
 }
 
 func (vs *VicSnap) Prepare(ctx context.Context, key, parent string) ([]mount.Mount, error) {
-	return vs.prepareSnapshot("img", key, parent)
+	return vs.prepareSnapshot(ctx, "img", key, parent)
 }
 
 func (vs *VicSnap) View(ctx context.Context, key, parent string) ([]mount.Mount, error) {
-	return vs.prepareSnapshot("view", key, parent)
+	return vs.prepareSnapshot(ctx, "view", key, parent)
 }
 
 func (vs *VicSnap) Commit(ctx context.Context, name, key string) error {
@@ -183,12 +208,6 @@ func (vs *VicSnap) Commit(ctx context.Context, name, key string) error {
 	if _, ok := vs.snapshots[name]; ok {
 		return snapshot.ErrSnapshotExist
 	}
-	vs.snapshots[name] = snapshot.Info{
-		Name:     name,
-		Parent:   s.Parent,
-		Kind:     snapshot.KindCommitted,
-		Readonly: true,
-	}
 
 	params := storage.NewCommitImageParamsWithContext(ctx).
 		WithStoreName(vs.storageName).
@@ -196,6 +215,14 @@ func (vs *VicSnap) Commit(ctx context.Context, name, key string) error {
 		WithOldID(key)
 
 	_, err := vs.plClient.Storage.CommitImage(params)
+	if err == nil {
+		vs.snapshots[name] = snapshot.Info{
+			Name:     name,
+			Parent:   s.Parent,
+			Kind:     snapshot.KindCommitted,
+			Readonly: true,
+		}
+	}
 	return err
 }
 
@@ -222,6 +249,10 @@ func (vs *VicSnap) Remove(ctx context.Context, key string) error {
 }
 
 func (vs *VicSnap) Walk(ctx context.Context, fn func(context.Context, snapshot.Info) error) error {
-	logrus.Info("VicSnap Walk call")
+	for _, v := range vs.snapshots {
+		if v.Kind == snapshot.KindCommitted {
+			fn(ctx, v)
+		}
+	}
 	return nil
 }
