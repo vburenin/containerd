@@ -7,8 +7,9 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/containerd/containerd/api/services/shim"
 	"github.com/containerd/containerd/api/types/task"
+	client "github.com/containerd/containerd/linux/shim"
+	shim "github.com/containerd/containerd/linux/shim/v1"
 	"github.com/containerd/containerd/plugin"
 	protobuf "github.com/gogo/protobuf/types"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
@@ -18,11 +19,11 @@ import (
 type Task struct {
 	containerID string
 	spec        []byte
-	shim        shim.ShimClient
+	shim        *client.Client
 	namespace   string
 }
 
-func newTask(id, namespace string, spec []byte, shim shim.ShimClient) *Task {
+func newTask(id, namespace string, spec []byte, shim *client.Client) *Task {
 	return &Task{
 		containerID: id,
 		shim:        shim,
@@ -31,26 +32,26 @@ func newTask(id, namespace string, spec []byte, shim shim.ShimClient) *Task {
 	}
 }
 
-func (c *Task) Info() plugin.TaskInfo {
+func (t *Task) Info() plugin.TaskInfo {
 	return plugin.TaskInfo{
-		ID:          c.containerID,
-		ContainerID: c.containerID,
+		ID:          t.containerID,
+		ContainerID: t.containerID,
 		Runtime:     pluginID,
-		Spec:        c.spec,
-		Namespace:   c.namespace,
+		Spec:        t.spec,
+		Namespace:   t.namespace,
 	}
 }
 
-func (c *Task) Start(ctx context.Context) error {
-	_, err := c.shim.Start(ctx, &shim.StartRequest{})
+func (t *Task) Start(ctx context.Context) error {
+	_, err := t.shim.Start(ctx, empty)
 	if err != nil {
 		err = errors.New(grpc.ErrorDesc(err))
 	}
 	return err
 }
 
-func (c *Task) State(ctx context.Context) (plugin.State, error) {
-	response, err := c.shim.State(ctx, &shim.StateRequest{})
+func (t *Task) State(ctx context.Context) (plugin.State, error) {
+	response, err := t.shim.State(ctx, empty)
 	if err != nil {
 		return plugin.State{}, errors.New(grpc.ErrorDesc(err))
 	}
@@ -76,24 +77,24 @@ func (c *Task) State(ctx context.Context) (plugin.State, error) {
 	}, nil
 }
 
-func (c *Task) Pause(ctx context.Context) error {
-	_, err := c.shim.Pause(ctx, &shim.PauseRequest{})
+func (t *Task) Pause(ctx context.Context) error {
+	_, err := t.shim.Pause(ctx, empty)
 	if err != nil {
 		err = errors.New(grpc.ErrorDesc(err))
 	}
 	return err
 }
 
-func (c *Task) Resume(ctx context.Context) error {
-	_, err := c.shim.Resume(ctx, &shim.ResumeRequest{})
+func (t *Task) Resume(ctx context.Context) error {
+	_, err := t.shim.Resume(ctx, empty)
 	if err != nil {
 		err = errors.New(grpc.ErrorDesc(err))
 	}
 	return err
 }
 
-func (c *Task) Kill(ctx context.Context, signal uint32, pid uint32, all bool) error {
-	_, err := c.shim.Kill(ctx, &shim.KillRequest{
+func (t *Task) Kill(ctx context.Context, signal uint32, pid uint32, all bool) error {
+	_, err := t.shim.Kill(ctx, &shim.KillRequest{
 		Signal: signal,
 		Pid:    pid,
 		All:    all,
@@ -104,8 +105,8 @@ func (c *Task) Kill(ctx context.Context, signal uint32, pid uint32, all bool) er
 	return err
 }
 
-func (c *Task) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Process, error) {
-	request := &shim.ExecRequest{
+func (t *Task) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Process, error) {
+	request := &shim.ExecProcessRequest{
 		Stdin:    opts.IO.Stdin,
 		Stdout:   opts.IO.Stdout,
 		Stderr:   opts.IO.Stderr,
@@ -115,20 +116,20 @@ func (c *Task) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Process, 
 			Value:   opts.Spec,
 		},
 	}
-	resp, err := c.shim.Exec(ctx, request)
+	resp, err := t.shim.Exec(ctx, request)
 	if err != nil {
 		return nil, errors.New(grpc.ErrorDesc(err))
 
 	}
 	return &Process{
 		pid: int(resp.Pid),
-		c:   c,
+		t:   t,
 	}, nil
 }
 
-func (c *Task) Processes(ctx context.Context) ([]uint32, error) {
-	resp, err := c.shim.Processes(ctx, &shim.ProcessesRequest{
-		ID: c.containerID,
+func (t *Task) Processes(ctx context.Context) ([]uint32, error) {
+	resp, err := t.shim.ListProcesses(ctx, &shim.ListProcessesRequest{
+		ID: t.containerID,
 	})
 	if err != nil {
 		return nil, errors.New(grpc.ErrorDesc(err))
@@ -143,8 +144,8 @@ func (c *Task) Processes(ctx context.Context) ([]uint32, error) {
 	return pids, nil
 }
 
-func (c *Task) Pty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
-	_, err := c.shim.Pty(ctx, &shim.PtyRequest{
+func (t *Task) ResizePty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
+	_, err := t.shim.ResizePty(ctx, &shim.ResizePtyRequest{
 		Pid:    pid,
 		Width:  size.Width,
 		Height: size.Height,
@@ -155,9 +156,10 @@ func (c *Task) Pty(ctx context.Context, pid uint32, size plugin.ConsoleSize) err
 	return err
 }
 
-func (c *Task) CloseStdin(ctx context.Context, pid uint32) error {
-	_, err := c.shim.CloseStdin(ctx, &shim.CloseStdinRequest{
-		Pid: pid,
+func (t *Task) CloseIO(ctx context.Context, pid uint32) error {
+	_, err := t.shim.CloseIO(ctx, &shim.CloseIORequest{
+		Pid:   pid,
+		Stdin: true,
 	})
 	if err != nil {
 		err = errors.New(grpc.ErrorDesc(err))
@@ -165,24 +167,19 @@ func (c *Task) CloseStdin(ctx context.Context, pid uint32) error {
 	return err
 }
 
-func (c *Task) Checkpoint(ctx context.Context, opts plugin.CheckpointOpts) error {
-	_, err := c.shim.Checkpoint(ctx, &shim.CheckpointRequest{
-		Exit:             opts.Exit,
-		AllowTcp:         opts.AllowTCP,
-		AllowUnixSockets: opts.AllowUnixSockets,
-		AllowTerminal:    opts.AllowTerminal,
-		FileLocks:        opts.FileLocks,
-		EmptyNamespaces:  opts.EmptyNamespaces,
-		CheckpointPath:   opts.Path,
-	})
-	if err != nil {
-		err = errors.New(grpc.ErrorDesc(err))
+func (t *Task) Checkpoint(ctx context.Context, path string, options map[string]string) error {
+	r := &shim.CheckpointTaskRequest{
+		Path:    path,
+		Options: options,
 	}
-	return err
+	if _, err := t.shim.Checkpoint(ctx, r); err != nil {
+		return errors.New(grpc.ErrorDesc(err))
+	}
+	return nil
 }
 
-func (c *Task) DeleteProcess(ctx context.Context, pid uint32) (*plugin.Exit, error) {
-	r, err := c.shim.DeleteProcess(ctx, &shim.DeleteProcessRequest{
+func (t *Task) DeleteProcess(ctx context.Context, pid uint32) (*plugin.Exit, error) {
+	r, err := t.shim.DeleteProcess(ctx, &shim.DeleteProcessRequest{
 		Pid: pid,
 	})
 	if err != nil {
@@ -191,16 +188,17 @@ func (c *Task) DeleteProcess(ctx context.Context, pid uint32) (*plugin.Exit, err
 	return &plugin.Exit{
 		Status:    r.ExitStatus,
 		Timestamp: r.ExitedAt,
+		Pid:       pid,
 	}, nil
 }
 
 type Process struct {
 	pid int
-	c   *Task
+	t   *Task
 }
 
 func (p *Process) Kill(ctx context.Context, signal uint32, _ bool) error {
-	_, err := p.c.shim.Kill(ctx, &shim.KillRequest{
+	_, err := p.t.shim.Kill(ctx, &shim.KillRequest{
 		Signal: signal,
 		Pid:    uint32(p.pid),
 	})
@@ -212,7 +210,7 @@ func (p *Process) Kill(ctx context.Context, signal uint32, _ bool) error {
 
 func (p *Process) State(ctx context.Context) (plugin.State, error) {
 	// use the container status for the status of the process
-	state, err := p.c.State(ctx)
+	state, err := p.t.State(ctx)
 	if err != nil {
 		return state, err
 	}

@@ -15,9 +15,8 @@ import (
 )
 
 const (
-	defaultRoot  = "/var/lib/containerd-test"
-	defaultState = "/run/containerd-test"
-	testImage    = "docker.io/library/alpine:latest"
+	defaultRoot = "/var/lib/containerd-test"
+	testImage   = "docker.io/library/alpine:latest"
 )
 
 var (
@@ -27,7 +26,7 @@ var (
 )
 
 func init() {
-	flag.StringVar(&address, "address", "/run/containerd/containerd.sock", "The address to the containerd socket for use in the tests")
+	flag.StringVar(&address, "address", "/run/containerd-test/containerd.sock", "The address to the containerd socket for use in the tests")
 	flag.BoolVar(&noDaemon, "no-daemon", false, "Do not start a dedicated daemon for the tests")
 	flag.Parse()
 }
@@ -58,28 +57,31 @@ func TestMain(m *testing.M) {
 		// setup a new containerd daemon if !testing.Short
 		cmd = exec.Command("containerd",
 			"--root", defaultRoot,
-			"--state", defaultState,
+			"--address", address,
 		)
 		cmd.Stderr = buf
 		if err := cmd.Start(); err != nil {
-			fmt.Println(err)
+			cmd.Wait()
+			fmt.Fprintf(os.Stderr, "%s: %s", err, buf.String())
 			os.Exit(1)
 		}
 	}
 
-	client, err := New(address)
+	client, err := waitForDaemonStart(ctx, address)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
-	}
-	if err := waitForDaemonStart(ctx, client); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		cmd.Wait()
+		fmt.Fprintf(os.Stderr, "%s: %s", err, buf.String())
 		os.Exit(1)
 	}
 
 	// pull a seed image
 	if _, err = client.Pull(ctx, testImage, WithPullUnpack); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		cmd.Process.Signal(syscall.SIGTERM)
+		cmd.Wait()
+		fmt.Fprintf(os.Stderr, "%s: %s", err, buf.String())
 		os.Exit(1)
 
 	}
@@ -110,20 +112,26 @@ func TestMain(m *testing.M) {
 	os.Exit(status)
 }
 
-func waitForDaemonStart(ctx context.Context, client *Client) error {
+func waitForDaemonStart(ctx context.Context, address string) (*Client, error) {
 	var (
+		client  *Client
 		serving bool
 		err     error
 	)
 
 	for i := 0; i < 20; i++ {
-		serving, err = client.IsServing(ctx)
-		if serving {
-			return nil
+		if client == nil {
+			client, err = New(address)
+		}
+		if err == nil {
+			serving, err = client.IsServing(ctx)
+			if serving {
+				return client, nil
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return fmt.Errorf("containerd did not start within 2s: %v", err)
+	return nil, fmt.Errorf("containerd did not start within 2s: %v", err)
 }
 
 func TestNewClient(t *testing.T) {

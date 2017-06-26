@@ -5,6 +5,8 @@ import (
 	"os"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/containerd/containerd"
+	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/version"
 	"github.com/urfave/cli"
 )
@@ -38,7 +40,7 @@ containerd CLI
 		cli.StringFlag{
 			Name:  "address, a",
 			Usage: "address for containerd's GRPC server",
-			Value: "/run/containerd/containerd.sock",
+			Value: containerd.DefaultAddress,
 		},
 		cli.DurationFlag{
 			Name:  "timeout",
@@ -47,8 +49,8 @@ containerd CLI
 		cli.StringFlag{
 			Name:   "namespace, n",
 			Usage:  "namespace to use with commands",
-			Value:  "default",
-			EnvVar: "CONTAINERD_NAMESPACE",
+			Value:  namespaces.Default,
+			EnvVar: namespaces.NamespaceEnvVar,
 		},
 	}
 	app.Commands = append([]cli.Command{
@@ -57,7 +59,9 @@ containerd CLI
 		runCommand,
 		deleteCommand,
 		namespacesCommand,
-		listCommand,
+		eventsCommand,
+		containerListCommand,
+		taskListCommand,
 		infoCommand,
 		killCommand,
 		pprofCommand,

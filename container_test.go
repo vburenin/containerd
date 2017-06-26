@@ -109,7 +109,7 @@ func TestContainerStart(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx)
+	defer container.Delete(ctx, WithRootFSDeletion)
 
 	task, err := container.NewTask(ctx, Stdio)
 	if err != nil {
@@ -180,7 +180,7 @@ func TestContainerOutput(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx)
+	defer container.Delete(ctx, WithRootFSDeletion)
 
 	stdout := bytes.NewBuffer(nil)
 	task, err := container.NewTask(ctx, NewIO(bytes.NewBuffer(nil), stdout, bytes.NewBuffer(nil)))
@@ -252,7 +252,7 @@ func TestContainerExec(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx)
+	defer container.Delete(ctx, WithRootFSDeletion)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -347,7 +347,7 @@ func TestContainerProcesses(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx)
+	defer container.Delete(ctx, WithRootFSDeletion)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -389,7 +389,7 @@ func TestContainerProcesses(t *testing.T) {
 	<-statusC
 }
 
-func TestContainerCloseStdin(t *testing.T) {
+func TestContainerCloseIO(t *testing.T) {
 	if testing.Short() {
 		t.Skip()
 	}
@@ -420,7 +420,7 @@ func TestContainerCloseStdin(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx)
+	defer container.Delete(ctx, WithRootFSDeletion)
 
 	const expected = "hello\n"
 	stdout := bytes.NewBuffer(nil)
@@ -456,7 +456,7 @@ func TestContainerCloseStdin(t *testing.T) {
 		t.Error(err)
 	}
 	w.Close()
-	if err := task.CloseStdin(ctx); err != nil {
+	if err := task.CloseIO(ctx, WithStdinCloser); err != nil {
 		t.Error(err)
 	}
 
@@ -504,7 +504,7 @@ func TestContainerAttach(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx)
+	defer container.Delete(ctx, WithRootFSDeletion)
 
 	expected := "hello\n"
 	stdout := bytes.NewBuffer(nil)
@@ -576,7 +576,7 @@ func TestContainerAttach(t *testing.T) {
 	}
 	w.Close()
 
-	if err := task.CloseStdin(ctx); err != nil {
+	if err := task.CloseIO(ctx, WithStdinCloser); err != nil {
 		t.Error(err)
 	}
 
@@ -595,5 +595,142 @@ func TestContainerAttach(t *testing.T) {
 	expected = expected + expected
 	if output != expected {
 		t.Errorf("expected output %q but received %q", expected, output)
+	}
+}
+
+func TestDeleteRunningContainer(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	client, err := New(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var (
+		ctx, cancel = testContext()
+		id          = t.Name()
+	)
+	defer cancel()
+
+	image, err := client.GetImage(ctx, testImage)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("sleep", "100"))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx, WithRootFSDeletion)
+
+	task, err := container.NewTask(ctx, empty())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer task.Delete(ctx)
+
+	statusC := make(chan uint32, 1)
+	go func() {
+		status, err := task.Wait(ctx)
+		if err != nil {
+			t.Error(err)
+		}
+		statusC <- status
+	}()
+
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+
+	err = container.Delete(ctx, WithRootFSDeletion)
+	if err == nil {
+		t.Error("delete did not error with running task")
+	}
+	if err != ErrDeleteRunningTask {
+		t.Errorf("expected error %q but received %q", ErrDeleteRunningTask, err)
+	}
+	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
+		t.Error(err)
+		return
+	}
+	<-statusC
+}
+
+func TestContainerKill(t *testing.T) {
+	if testing.Short() {
+		t.Skip()
+	}
+	client, err := New(address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var (
+		ctx, cancel = testContext()
+		id          = t.Name()
+	)
+	defer cancel()
+
+	image, err := client.GetImage(ctx, testImage)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("sh", "-c", "cat"))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx)
+
+	task, err := container.NewTask(ctx, Stdio)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer task.Delete(ctx)
+
+	statusC := make(chan uint32, 1)
+	go func() {
+		status, err := task.Wait(ctx)
+		if err != nil {
+			t.Error(err)
+		}
+		statusC <- status
+	}()
+
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
+		t.Error(err)
+		return
+	}
+	<-statusC
+
+	err = task.Kill(ctx, syscall.SIGTERM)
+	if err == nil {
+		t.Error("second call to kill should return an error")
+		return
+	}
+	if err != ErrProcessExited {
+		t.Errorf("expected error %q but received %q", ErrProcessExited, err)
 	}
 }

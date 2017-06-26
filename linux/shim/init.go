@@ -17,9 +17,10 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/containerd/console"
-	shimapi "github.com/containerd/containerd/api/services/shim"
+	shimapi "github.com/containerd/containerd/linux/shim/v1"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/fifo"
 	runc "github.com/containerd/go-runc"
 	"github.com/pkg/errors"
@@ -51,7 +52,7 @@ type initProcess struct {
 	terminal   bool
 }
 
-func newInitProcess(context context.Context, path, namespace string, r *shimapi.CreateRequest) (*initProcess, error) {
+func newInitProcess(context context.Context, path, namespace string, r *shimapi.CreateTaskRequest) (*initProcess, error) {
 	for _, rm := range r.Rootfs {
 		m := &mount.Mount{
 			Type:    rm.Type,
@@ -103,9 +104,10 @@ func newInitProcess(context context.Context, path, namespace string, r *shimapi.
 				WorkDir:    filepath.Join(r.Bundle, "work"),
 				ParentPath: r.ParentCheckpoint,
 			},
-			PidFile:     pidFile,
-			IO:          io,
-			NoPivot:     r.NoPivot,
+			PidFile: pidFile,
+			IO:      io,
+			// TODO: implement runtime options
+			//NoPivot:     r.NoPivot,
 			Detach:      true,
 			NoSubreaper: true,
 		}
@@ -116,7 +118,7 @@ func newInitProcess(context context.Context, path, namespace string, r *shimapi.
 		opts := &runc.CreateOpts{
 			PidFile: pidFile,
 			IO:      io,
-			NoPivot: r.NoPivot,
+			// NoPivot: r.NoPivot,
 		}
 		if socket != nil {
 			opts.ConsoleSocket = socket
@@ -234,7 +236,7 @@ func (p *initProcess) Kill(context context.Context, signal uint32, all bool) err
 	err := p.runc.Kill(context, p.id, int(signal), &runc.KillOpts{
 		All: all,
 	})
-	return p.runcError(err, "runc kill failed")
+	return checkKillError(err)
 }
 
 func (p *initProcess) killAll(context context.Context) error {
@@ -245,28 +247,33 @@ func (p *initProcess) killAll(context context.Context) error {
 }
 
 func (p *initProcess) Signal(sig int) error {
-	return unix.Kill(p.pid, syscall.Signal(sig))
+	return checkKillError(unix.Kill(p.pid, syscall.Signal(sig)))
 }
 
 func (p *initProcess) Stdin() io.Closer {
 	return p.stdin
 }
 
-func (p *initProcess) Checkpoint(context context.Context, r *shimapi.CheckpointRequest) error {
+func (p *initProcess) Checkpoint(context context.Context, r *shimapi.CheckpointTaskRequest) error {
 	var actions []runc.CheckpointAction
-	if !r.Exit {
-		actions = append(actions, runc.LeaveRunning)
-	}
+	/*
+		if !r.Exit {
+			actions = append(actions, runc.LeaveRunning)
+		}
+	*/
 	work := filepath.Join(p.bundle, "work")
 	defer os.RemoveAll(work)
+	// TODO: convert options into runc flags or a better format for criu
 	if err := p.runc.Checkpoint(context, p.id, &runc.CheckpointOpts{
-		WorkDir:                  work,
-		ImagePath:                r.CheckpointPath,
-		AllowOpenTCP:             r.AllowTcp,
-		AllowExternalUnixSockets: r.AllowUnixSockets,
-		AllowTerminal:            r.AllowTerminal,
-		FileLocks:                r.FileLocks,
-		EmptyNamespaces:          r.EmptyNamespaces,
+		WorkDir:   work,
+		ImagePath: r.Path,
+		/*
+			AllowOpenTCP:             r.AllowTcp,
+			AllowExternalUnixSockets: r.AllowUnixSockets,
+			AllowTerminal:            r.AllowTerminal,
+			FileLocks:                r.FileLocks,
+			EmptyNamespaces:          r.EmptyNamespaces,
+		*/
 	}, actions...); err != nil {
 		dumpLog := filepath.Join(p.bundle, "criu-dump.log")
 		if cerr := copyFile(dumpLog, filepath.Join(work, "dump.log")); cerr != nil {
@@ -318,9 +325,9 @@ func (p *initProcess) runcError(rErr error, msg string) error {
 	rMsg, err := getLastRuncError(p.runc)
 	switch {
 	case err != nil:
-		return errors.Wrapf(err, "%s: %s (%s)", msg, "unable to retrieve runc error", err.Error())
+		return errors.Wrapf(rErr, "%s: %s (%s)", msg, "unable to retrieve runc error", err.Error())
 	case rMsg == "":
-		return errors.Wrap(err, msg)
+		return errors.Wrap(rErr, msg)
 	default:
 		return errors.Errorf("%s: %s", msg, rMsg)
 	}
@@ -345,5 +352,15 @@ func copyFile(to, from string) error {
 	}
 	defer tt.Close()
 	_, err = io.Copy(tt, ff)
+	return err
+}
+
+func checkKillError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if strings.Contains(err.Error(), "os: process already finished") || err == unix.ESRCH {
+		return plugin.ErrProcessExited
+	}
 	return err
 }

@@ -12,15 +12,15 @@ import (
 
 	"github.com/Sirupsen/logrus"
 	"github.com/containerd/containerd"
-	containersapi "github.com/containerd/containerd/api/services/containers"
-	contentapi "github.com/containerd/containerd/api/services/content"
-	diffapi "github.com/containerd/containerd/api/services/diff"
-	"github.com/containerd/containerd/api/services/execution"
-	imagesapi "github.com/containerd/containerd/api/services/images"
-	namespacesapi "github.com/containerd/containerd/api/services/namespaces"
-	snapshotapi "github.com/containerd/containerd/api/services/snapshot"
-	versionservice "github.com/containerd/containerd/api/services/version"
-	"github.com/containerd/containerd/api/types/task"
+	containersapi "github.com/containerd/containerd/api/services/containers/v1"
+	contentapi "github.com/containerd/containerd/api/services/content/v1"
+	diffapi "github.com/containerd/containerd/api/services/diff/v1"
+	"github.com/containerd/containerd/api/services/events/v1"
+	imagesapi "github.com/containerd/containerd/api/services/images/v1"
+	namespacesapi "github.com/containerd/containerd/api/services/namespaces/v1"
+	snapshotapi "github.com/containerd/containerd/api/services/snapshot/v1"
+	"github.com/containerd/containerd/api/services/tasks/v1"
+	versionservice "github.com/containerd/containerd/api/services/version/v1"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/namespaces"
@@ -81,12 +81,21 @@ func getContainersService(context *cli.Context) (containersapi.ContainersClient,
 	return containersapi.NewContainersClient(conn), nil
 }
 
-func getTasksService(context *cli.Context) (execution.TasksClient, error) {
+func getTasksService(context *cli.Context) (tasks.TasksClient, error) {
 	conn, err := getGRPCConnection(context)
 	if err != nil {
 		return nil, err
 	}
-	return execution.NewTasksClient(conn), nil
+	return tasks.NewTasksClient(conn), nil
+}
+
+func getEventsService(context *cli.Context) (events.EventsClient, error) {
+	conn, err := getGRPCConnection(context)
+	if err != nil {
+		return nil, err
+	}
+
+	return events.NewEventsClient(conn), nil
 }
 
 func getContentStore(context *cli.Context) (content.Store, error) {
@@ -102,7 +111,7 @@ func getSnapshotter(context *cli.Context) (snapshot.Snapshotter, error) {
 	if err != nil {
 		return nil, err
 	}
-	return snapshotservice.NewSnapshotterFromClient(snapshotapi.NewSnapshotClient(conn)), nil
+	return snapshotservice.NewSnapshotterFromClient(snapshotapi.NewSnapshotsClient(conn)), nil
 }
 
 func getImageStore(clicontext *cli.Context) (images.Store, error) {
@@ -127,21 +136,6 @@ func getVersionService(context *cli.Context) (versionservice.VersionClient, erro
 		return nil, err
 	}
 	return versionservice.NewVersionClient(conn), nil
-}
-
-func waitContainer(events execution.Tasks_EventsClient, id string, pid uint32) (uint32, error) {
-	for {
-		e, err := events.Recv()
-		if err != nil {
-			return 255, err
-		}
-		if e.Type != task.Event_EXIT {
-			continue
-		}
-		if e.ID == id && e.Pid == pid {
-			return e.ExitStatus, nil
-		}
-	}
 }
 
 func forwardAllSignals(ctx gocontext.Context, task killer) chan os.Signal {

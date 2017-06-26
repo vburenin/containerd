@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"syscall"
 
-	"github.com/containerd/containerd/api/services/execution"
-	taskapi "github.com/containerd/containerd/api/types/task"
+	eventsapi "github.com/containerd/containerd/api/services/events/v1"
+	"github.com/containerd/containerd/api/services/tasks/v1"
+	"github.com/containerd/containerd/events"
 	protobuf "github.com/gogo/protobuf/types"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
@@ -38,7 +39,7 @@ func (p *process) Start(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	request := &execution.ExecRequest{
+	request := &tasks.ExecProcessRequest{
 		ContainerID: p.task.containerID,
 		Terminal:    p.io.Terminal,
 		Stdin:       p.io.Stdin,
@@ -59,10 +60,10 @@ func (p *process) Start(ctx context.Context) error {
 }
 
 func (p *process) Kill(ctx context.Context, s syscall.Signal) error {
-	_, err := p.task.client.TaskService().Kill(ctx, &execution.KillRequest{
+	_, err := p.task.client.TaskService().Kill(ctx, &tasks.KillRequest{
 		Signal:      uint32(s),
 		ContainerID: p.task.containerID,
-		PidOrAll: &execution.KillRequest_Pid{
+		PidOrAll: &tasks.KillRequest_Pid{
 			Pid: p.pid,
 		},
 	})
@@ -70,30 +71,46 @@ func (p *process) Kill(ctx context.Context, s syscall.Signal) error {
 }
 
 func (p *process) Wait(ctx context.Context) (uint32, error) {
-	events, err := p.task.client.TaskService().Events(ctx, &execution.EventsRequest{})
+	// TODO (ehazlett): add filtering for specific event
+	eventstream, err := p.task.client.EventService().Stream(ctx, &eventsapi.StreamEventsRequest{})
 	if err != nil {
 		return UnknownExitStatus, err
 	}
 	<-p.pidSync
+evloop:
 	for {
-		e, err := events.Recv()
+		evt, err := eventstream.Recv()
 		if err != nil {
 			return UnknownExitStatus, err
 		}
-		if e.Type != taskapi.Event_EXIT {
-			continue
-		}
-		if e.ID == p.task.containerID && e.Pid == p.pid {
-			return e.ExitStatus, nil
+
+		switch {
+		case events.Is(evt.Event, &eventsapi.RuntimeEvent{}):
+			var e eventsapi.RuntimeEvent
+			if err := events.UnmarshalEvent(evt.Event, &e); err != nil {
+				return UnknownExitStatus, err
+			}
+
+			if e.Type != eventsapi.RuntimeEvent_EXIT {
+				continue evloop
+			}
+
+			if e.ID == p.task.containerID && e.Pid == p.pid {
+				return e.ExitStatus, nil
+			}
 		}
 	}
 }
 
-func (p *process) CloseStdin(ctx context.Context) error {
-	_, err := p.task.client.TaskService().CloseStdin(ctx, &execution.CloseStdinRequest{
+func (p *process) CloseIO(ctx context.Context, opts ...IOCloserOpts) error {
+	r := &tasks.CloseIORequest{
 		ContainerID: p.task.containerID,
 		Pid:         p.pid,
-	})
+	}
+	for _, o := range opts {
+		o(r)
+	}
+	_, err := p.task.client.TaskService().CloseIO(ctx, r)
 	return err
 }
 
@@ -102,7 +119,7 @@ func (p *process) IO() *IO {
 }
 
 func (p *process) Resize(ctx context.Context, w, h uint32) error {
-	_, err := p.task.client.TaskService().Pty(ctx, &execution.PtyRequest{
+	_, err := p.task.client.TaskService().ResizePty(ctx, &tasks.ResizePtyRequest{
 		ContainerID: p.task.containerID,
 		Width:       w,
 		Height:      h,
@@ -113,7 +130,7 @@ func (p *process) Resize(ctx context.Context, w, h uint32) error {
 
 func (p *process) Delete(ctx context.Context) (uint32, error) {
 	cerr := p.io.Close()
-	r, err := p.task.client.TaskService().DeleteProcess(ctx, &execution.DeleteProcessRequest{
+	r, err := p.task.client.TaskService().DeleteProcess(ctx, &tasks.DeleteProcessRequest{
 		ContainerID: p.task.containerID,
 		Pid:         p.pid,
 	})

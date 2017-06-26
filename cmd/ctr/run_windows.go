@@ -11,8 +11,8 @@ import (
 	"github.com/Sirupsen/logrus"
 	"github.com/containerd/console"
 	"github.com/containerd/containerd"
-	containersapi "github.com/containerd/containerd/api/services/containers"
-	"github.com/containerd/containerd/api/services/execution"
+	containersapi "github.com/containerd/containerd/api/services/containers/v1"
+	"github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/windows"
@@ -150,16 +150,18 @@ func newCreateContainerRequest(context *cli.Context, id, snapshot, image string,
 				TypeUrl: specs.Version,
 				Value:   spec,
 			},
-			Runtime: context.String("runtime"),
-			RootFS:  snapshot,
+			Runtime: &containersapi.Container_Runtime{
+				Name: context.String("runtime"),
+			},
+			RootFS: snapshot,
 		},
 	}
 
 	return create, nil
 }
 
-func newCreateTaskRequest(context *cli.Context, id, tmpDir string, checkpoint *ocispec.Descriptor, mounts []mount.Mount) (*execution.CreateRequest, error) {
-	create := &execution.CreateRequest{
+func newCreateTaskRequest(context *cli.Context, id, tmpDir string, checkpoint *ocispec.Descriptor, mounts []mount.Mount) (*tasks.CreateTaskRequest, error) {
+	create := &tasks.CreateTaskRequest{
 		ContainerID: id,
 		Terminal:    context.Bool("tty"),
 		Stdin:       fmt.Sprintf(`%s\ctr-%s-stdin`, pipeRoot, id),

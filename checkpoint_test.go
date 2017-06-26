@@ -39,7 +39,7 @@ func TestCheckpointRestore(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx)
+	defer container.Delete(ctx, WithRootFSDeletion)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -132,7 +132,7 @@ func TestCheckpointRestoreNewContainer(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx)
+	defer container.Delete(ctx, WithRootFSDeletion)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -163,11 +163,11 @@ func TestCheckpointRestoreNewContainer(t *testing.T) {
 
 	<-statusC
 
-	if err := container.Delete(ctx); err != nil {
+	if _, err := task.Delete(ctx); err != nil {
 		t.Error(err)
 		return
 	}
-	if _, err := task.Delete(ctx); err != nil {
+	if err := container.Delete(ctx, WithRootFSDeletion); err != nil {
 		t.Error(err)
 		return
 	}

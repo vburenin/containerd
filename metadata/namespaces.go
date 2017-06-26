@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/boltdb/bolt"
+	"github.com/containerd/containerd/identifiers"
 	"github.com/containerd/containerd/namespaces"
 )
 
@@ -21,11 +22,15 @@ func (s *namespaceStore) Create(ctx context.Context, namespace string, labels ma
 		return err
 	}
 
+	if err := identifiers.Validate(namespace); err != nil {
+		return err
+	}
+
 	// provides the already exists error.
 	bkt, err := topbkt.CreateBucket([]byte(namespace))
 	if err != nil {
 		if err == bolt.ErrBucketExists {
-			return ErrExists
+			return ErrExists("")
 		}
 
 		return err
@@ -100,12 +105,12 @@ func (s *namespaceStore) Delete(ctx context.Context, namespace string) error {
 	if empty, err := s.namespaceEmpty(ctx, namespace); err != nil {
 		return err
 	} else if !empty {
-		return ErrNotEmpty
+		return ErrNotEmpty("")
 	}
 
 	if err := bkt.DeleteBucket([]byte(namespace)); err != nil {
 		if err == bolt.ErrBucketNotFound {
-			return ErrNotFound
+			return ErrNotFound("")
 		}
 
 		return err

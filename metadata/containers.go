@@ -6,6 +6,7 @@ import (
 
 	"github.com/boltdb/bolt"
 	"github.com/containerd/containerd/containers"
+	"github.com/containerd/containerd/identifiers"
 	"github.com/containerd/containerd/namespaces"
 	"github.com/pkg/errors"
 )
@@ -28,7 +29,7 @@ func (s *containerStore) Get(ctx context.Context, id string) (containers.Contain
 
 	bkt := getContainerBucket(s.tx, namespace, id)
 	if bkt == nil {
-		return containers.Container{}, errors.Wrap(ErrNotFound, "bucket does not exist")
+		return containers.Container{}, ErrNotFound("bucket does not exist")
 	}
 
 	container := containers.Container{ID: id}
@@ -77,6 +78,10 @@ func (s *containerStore) Create(ctx context.Context, container containers.Contai
 		return containers.Container{}, err
 	}
 
+	if err := identifiers.Validate(container.ID); err != nil {
+		return containers.Container{}, err
+	}
+
 	bkt, err := createContainersBucket(s.tx, namespace)
 	if err != nil {
 		return containers.Container{}, err
@@ -85,7 +90,7 @@ func (s *containerStore) Create(ctx context.Context, container containers.Contai
 	cbkt, err := bkt.CreateBucket([]byte(container.ID))
 	if err != nil {
 		if err == bolt.ErrBucketExists {
-			err = errors.Wrap(ErrExists, "content for id already exists")
+			err = ErrExists("content for id already exists")
 		}
 		return containers.Container{}, err
 	}
@@ -107,12 +112,12 @@ func (s *containerStore) Update(ctx context.Context, container containers.Contai
 
 	bkt := getContainersBucket(s.tx, namespace)
 	if bkt == nil {
-		return containers.Container{}, errors.Wrap(ErrNotFound, "no containers")
+		return containers.Container{}, ErrNotFound("no containers")
 	}
 
 	cbkt := bkt.Bucket([]byte(container.ID))
 	if cbkt == nil {
-		return containers.Container{}, errors.Wrap(ErrNotFound, "no content for id")
+		return containers.Container{}, ErrNotFound("no content for id")
 	}
 
 	container.UpdatedAt = time.Now()
@@ -131,11 +136,11 @@ func (s *containerStore) Delete(ctx context.Context, id string) error {
 
 	bkt := getContainersBucket(s.tx, namespace)
 	if bkt == nil {
-		return errors.Wrap(ErrNotFound, "no containers")
+		return ErrNotFound("no containers")
 	}
 
 	if err := bkt.DeleteBucket([]byte(id)); err == bolt.ErrBucketNotFound {
-		return errors.Wrap(ErrNotFound, "no content for id")
+		return ErrNotFound("no content for id")
 	}
 	return err
 }
@@ -146,7 +151,26 @@ func readContainer(container *containers.Container, bkt *bolt.Bucket) error {
 		case string(bucketKeyImage):
 			container.Image = string(v)
 		case string(bucketKeyRuntime):
-			container.Runtime = string(v)
+			rbkt := bkt.Bucket(bucketKeyRuntime)
+			if rbkt == nil {
+				return nil // skip runtime. should be an error?
+			}
+
+			n := rbkt.Get(bucketKeyName)
+			if n != nil {
+				container.Runtime.Name = string(n)
+			}
+
+			obkt := rbkt.Bucket(bucketKeyOptions)
+			if obkt == nil {
+				return nil
+			}
+
+			container.Runtime.Options = map[string]string{}
+			return obkt.ForEach(func(k, v []byte) error {
+				container.Runtime.Options[string(k)] = string(v)
+				return nil
+			})
 		case string(bucketKeySpec):
 			container.Spec = make([]byte, len(v))
 			copy(container.Spec, v)
@@ -187,9 +211,9 @@ func writeContainer(container *containers.Container, bkt *bolt.Bucket) error {
 	if err != nil {
 		return err
 	}
+
 	for _, v := range [][2][]byte{
 		{bucketKeyImage, []byte(container.Image)},
-		{bucketKeyRuntime, []byte(container.Runtime)},
 		{bucketKeySpec, container.Spec},
 		{bucketKeyRootFS, []byte(container.RootFS)},
 		{bucketKeyCreatedAt, createdAt},
@@ -199,6 +223,33 @@ func writeContainer(container *containers.Container, bkt *bolt.Bucket) error {
 			return err
 		}
 	}
+
+	if rbkt := bkt.Bucket(bucketKeyRuntime); rbkt != nil {
+		if err := bkt.DeleteBucket(bucketKeyRuntime); err != nil {
+			return err
+		}
+	}
+
+	rbkt, err := bkt.CreateBucket(bucketKeyRuntime)
+	if err != nil {
+		return err
+	}
+
+	if err := rbkt.Put(bucketKeyName, []byte(container.Runtime.Name)); err != nil {
+		return err
+	}
+
+	obkt, err := rbkt.CreateBucket(bucketKeyOptions)
+	if err != nil {
+		return err
+	}
+
+	for k, v := range container.Runtime.Options {
+		if err := obkt.Put([]byte(k), []byte(v)); err != nil {
+			return err
+		}
+	}
+
 	// Remove existing labels to keep from merging
 	if lbkt := bkt.Bucket(bucketKeyLabels); lbkt != nil {
 		if err := bkt.DeleteBucket(bucketKeyLabels); err != nil {

@@ -17,9 +17,7 @@ import (
 	winsys "golang.org/x/sys/windows"
 )
 
-var (
-	ErrLoadedContainer = errors.New("loaded container can only be terminated")
-)
+var ErrLoadedContainer = errors.New("loaded container can only be terminated")
 
 type eventCallback func(id string, evType plugin.EventType, pid, exitStatus uint32, exitedAt time.Time)
 
@@ -160,12 +158,12 @@ func (c *container) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Proc
 	return &process{p}, nil
 }
 
-func (c *container) CloseStdin(ctx context.Context, pid uint32) error {
-	return c.ctr.CloseStdin(ctx, pid)
+func (c *container) CloseIO(ctx context.Context, pid uint32) error {
+	return c.ctr.CloseIO(ctx, pid)
 }
 
-func (c *container) Pty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
-	return c.ctr.Pty(ctx, pid, size)
+func (c *container) ResizePty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
+	return c.ctr.ResizePty(ctx, pid, size)
 }
 
 func (c *container) Status() plugin.Status {
@@ -190,7 +188,7 @@ func (c *container) Processes(ctx context.Context) ([]uint32, error) {
 	return pids, nil
 }
 
-func (c *container) Checkpoint(ctx context.Context, opts plugin.CheckpointOpts) error {
+func (c *container) Checkpoint(ctx context.Context, _ string, _ map[string]string) error {
 	return fmt.Errorf("Windows containers do not support checkpoint")
 }
 

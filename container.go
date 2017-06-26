@@ -9,22 +9,26 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 
-	"github.com/containerd/containerd/api/services/containers"
-	"github.com/containerd/containerd/api/services/execution"
-	"github.com/containerd/containerd/api/types/mount"
+	"github.com/containerd/containerd/api/services/containers/v1"
+	"github.com/containerd/containerd/api/services/tasks/v1"
+	"github.com/containerd/containerd/api/types"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 )
 
 var (
-	ErrNoImage       = errors.New("container does not have an image")
-	ErrNoRunningTask = errors.New("no running task")
+	ErrNoImage           = errors.New("container does not have an image")
+	ErrNoRunningTask     = errors.New("no running task")
+	ErrDeleteRunningTask = errors.New("cannot delete container with running task")
+	ErrProcessExited     = errors.New("process already exited")
 )
+
+type DeleteOpts func(context.Context, *Client, containers.Container) error
 
 type Container interface {
 	ID() string
 	Proto() containers.Container
-	Delete(context.Context) error
+	Delete(context.Context, ...DeleteOpts) error
 	NewTask(context.Context, IOCreation, ...NewTaskOpts) (Task, error)
 	Spec() (*specs.Spec, error)
 	Task(context.Context, IOAttach) (Task, error)
@@ -45,7 +49,6 @@ type container struct {
 
 	client *Client
 	c      containers.Container
-	task   *task
 }
 
 // ID returns the container's unique id
@@ -66,13 +69,24 @@ func (c *container) Spec() (*specs.Spec, error) {
 	return &s, nil
 }
 
+// WithRootFSDeletion deletes the rootfs allocated for the container
+func WithRootFSDeletion(ctx context.Context, client *Client, c containers.Container) error {
+	if c.RootFS != "" {
+		return client.SnapshotService().Remove(ctx, c.RootFS)
+	}
+	return nil
+}
+
 // Delete deletes an existing container
 // an error is returned if the container has running tasks
-func (c *container) Delete(ctx context.Context) (err error) {
-	// TODO: should the client be the one removing resources attached
-	// to the container at the moment before we have GC?
-	if c.c.RootFS != "" {
-		err = c.client.SnapshotService().Remove(ctx, c.c.RootFS)
+func (c *container) Delete(ctx context.Context, opts ...DeleteOpts) (err error) {
+	if _, err := c.Task(ctx, nil); err == nil {
+		return ErrDeleteRunningTask
+	}
+	for _, o := range opts {
+		if err := o(ctx, c.client, c.c); err != nil {
+			return err
+		}
 	}
 	if _, cerr := c.client.ContainerService().Delete(ctx, &containers.DeleteContainerRequest{
 		ID: c.c.ID,
@@ -83,16 +97,7 @@ func (c *container) Delete(ctx context.Context) (err error) {
 }
 
 func (c *container) Task(ctx context.Context, attach IOAttach) (Task, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.task == nil {
-		t, err := c.loadTask(ctx, attach)
-		if err != nil {
-			return nil, err
-		}
-		c.task = t.(*task)
-	}
-	return c.task, nil
+	return c.loadTask(ctx, attach)
 }
 
 // Image returns the image that the container is based on
@@ -110,7 +115,7 @@ func (c *container) Image(ctx context.Context) (Image, error) {
 	}, nil
 }
 
-type NewTaskOpts func(context.Context, *Client, *execution.CreateRequest) error
+type NewTaskOpts func(context.Context, *Client, *tasks.CreateTaskRequest) error
 
 func (c *container) NewTask(ctx context.Context, ioCreate IOCreation, opts ...NewTaskOpts) (Task, error) {
 	c.mu.Lock()
@@ -119,7 +124,7 @@ func (c *container) NewTask(ctx context.Context, ioCreate IOCreation, opts ...Ne
 	if err != nil {
 		return nil, err
 	}
-	request := &execution.CreateRequest{
+	request := &tasks.CreateTaskRequest{
 		ContainerID: c.c.ID,
 		Terminal:    i.Terminal,
 		Stdin:       i.Stdin,
@@ -133,7 +138,7 @@ func (c *container) NewTask(ctx context.Context, ioCreate IOCreation, opts ...Ne
 			return nil, err
 		}
 		for _, m := range mounts {
-			request.Rootfs = append(request.Rootfs, &mount.Mount{
+			request.Rootfs = append(request.Rootfs, &types.Mount{
 				Type:    m.Type,
 				Source:  m.Source,
 				Options: m.Options,
@@ -163,12 +168,11 @@ func (c *container) NewTask(ctx context.Context, ioCreate IOCreation, opts ...Ne
 		t.pid = response.Pid
 		close(t.pidSync)
 	}
-	c.task = t
 	return t, nil
 }
 
 func (c *container) loadTask(ctx context.Context, ioAttach IOAttach) (Task, error) {
-	response, err := c.client.TaskService().Info(ctx, &execution.InfoRequest{
+	response, err := c.client.TaskService().Get(ctx, &tasks.GetTaskRequest{
 		ContainerID: c.c.ID,
 	})
 	if err != nil {
@@ -206,7 +210,6 @@ func (c *container) loadTask(ctx context.Context, ioAttach IOAttach) (Task, erro
 		pid:         response.Task.Pid,
 		pidSync:     ps,
 	}
-	c.task = t
 	return t, nil
 }
 
