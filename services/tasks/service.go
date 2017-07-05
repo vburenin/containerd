@@ -16,12 +16,14 @@ import (
 	"github.com/containerd/containerd/archive"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/images"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/metadata"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/runtime"
 	protobuf "github.com/gogo/protobuf/types"
 	google_protobuf "github.com/golang/protobuf/ptypes/empty"
 	specs "github.com/opencontainers/image-spec/specs-go"
@@ -35,6 +37,9 @@ var (
 	_     = (api.TasksServer)(&Service{})
 	empty = &google_protobuf.Empty{}
 )
+
+// TODO(stevvooe): Clean up error mapping to avoid double mapping certain
+// errors within helper methods.
 
 func init() {
 	plugin.Register(&plugin.Registration{
@@ -62,9 +67,9 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-	runtimes := make(map[string]plugin.Runtime)
+	runtimes := make(map[string]runtime.Runtime)
 	for _, rr := range rt {
-		r := rr.(plugin.Runtime)
+		r := rr.(runtime.Runtime)
 		runtimes[r.ID()] = r
 	}
 	e := events.GetPoster(ic.Context)
@@ -77,7 +82,7 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 }
 
 type Service struct {
-	runtimes map[string]plugin.Runtime
+	runtimes map[string]runtime.Runtime
 	db       *bolt.DB
 	store    content.Store
 	emitter  events.Poster
@@ -114,25 +119,18 @@ func (s *Service) Create(ctx context.Context, r *api.CreateTaskRequest) (*api.Cr
 
 	container, err := s.getContainer(ctx, r.ContainerID)
 	if err != nil {
-		switch {
-		case metadata.IsNotFound(err):
-			return nil, grpc.Errorf(codes.NotFound, "container %v not found", r.ContainerID)
-		case metadata.IsExists(err):
-			return nil, grpc.Errorf(codes.AlreadyExists, "container %v already exists", r.ContainerID)
-		}
-
-		return nil, err
+		return nil, errdefs.ToGRPC(err)
 	}
-
-	opts := plugin.CreateOpts{
+	opts := runtime.CreateOpts{
 		Spec: container.Spec,
-		IO: plugin.IO{
+		IO: runtime.IO{
 			Stdin:    r.Stdin,
 			Stdout:   r.Stdout,
 			Stderr:   r.Stderr,
 			Terminal: r.Terminal,
 		},
 		Checkpoint: checkpointPath,
+		Options:    r.Options,
 	}
 	for _, m := range r.Rootfs {
 		opts.Rootfs = append(opts.Rootfs, mount.Mount{
@@ -227,7 +225,7 @@ func (s *Service) DeleteProcess(ctx context.Context, r *api.DeleteProcessRequest
 	}, nil
 }
 
-func taskFromContainerd(ctx context.Context, c plugin.Task) (*task.Task, error) {
+func taskFromContainerd(ctx context.Context, c runtime.Task) (*task.Task, error) {
 	state, err := c.State(ctx)
 	if err != nil {
 		return nil, err
@@ -235,13 +233,13 @@ func taskFromContainerd(ctx context.Context, c plugin.Task) (*task.Task, error) 
 
 	var status task.Status
 	switch state.Status {
-	case plugin.CreatedStatus:
+	case runtime.CreatedStatus:
 		status = task.StatusCreated
-	case plugin.RunningStatus:
+	case runtime.RunningStatus:
 		status = task.StatusRunning
-	case plugin.StoppedStatus:
+	case runtime.StoppedStatus:
 		status = task.StatusStopped
-	case plugin.PausedStatus:
+	case runtime.PausedStatus:
 		status = task.StatusPaused
 	default:
 		log.G(ctx).WithField("status", state.Status).Warn("unknown status")
@@ -339,25 +337,17 @@ func (s *Service) Kill(ctx context.Context, r *api.KillRequest) (*google_protobu
 	return empty, nil
 }
 
-func (s *Service) ListProcesses(ctx context.Context, r *api.ListProcessesRequest) (*api.ListProcessesResponse, error) {
+func (s *Service) ListPids(ctx context.Context, r *api.ListPidsRequest) (*api.ListPidsResponse, error) {
 	t, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
-
-	pids, err := t.Processes(ctx)
+	pids, err := t.Pids(ctx)
 	if err != nil {
 		return nil, err
 	}
-
-	ps := []*task.Process{}
-	for _, pid := range pids {
-		ps = append(ps, &task.Process{
-			Pid: pid,
-		})
-	}
-	return &api.ListProcessesResponse{
-		Processes: ps,
+	return &api.ListPidsResponse{
+		Pids: pids,
 	}, nil
 }
 
@@ -366,9 +356,9 @@ func (s *Service) Exec(ctx context.Context, r *api.ExecProcessRequest) (*api.Exe
 	if err != nil {
 		return nil, err
 	}
-	process, err := t.Exec(ctx, plugin.ExecOpts{
-		Spec: r.Spec.Value,
-		IO: plugin.IO{
+	process, err := t.Exec(ctx, runtime.ExecOpts{
+		Spec: r.Spec,
+		IO: runtime.IO{
 			Stdin:    r.Stdin,
 			Stdout:   r.Stdout,
 			Stderr:   r.Stderr,
@@ -392,7 +382,7 @@ func (s *Service) ResizePty(ctx context.Context, r *api.ResizePtyRequest) (*goog
 	if err != nil {
 		return nil, err
 	}
-	if err := t.ResizePty(ctx, r.Pid, plugin.ConsoleSize{
+	if err := t.ResizePty(ctx, r.Pid, runtime.ConsoleSize{
 		Width:  r.Width,
 		Height: r.Height,
 	}); err != nil {
@@ -451,6 +441,17 @@ func (s *Service) Checkpoint(ctx context.Context, r *api.CheckpointTaskRequest) 
 	}, nil
 }
 
+func (s *Service) Update(ctx context.Context, r *api.UpdateTaskRequest) (*google_protobuf.Empty, error) {
+	t, err := s.getTask(ctx, r.ContainerID)
+	if err != nil {
+		return nil, err
+	}
+	if err := t.Update(ctx, r.Resources); err != nil {
+		return nil, err
+	}
+	return empty, nil
+}
+
 func (s *Service) writeContent(ctx context.Context, mediaType, ref string, r io.Reader) (*types.Descriptor, error) {
 	writer, err := s.store.Writer(ctx, ref, 0, "")
 	if err != nil {
@@ -480,21 +481,21 @@ func (s *Service) getContainer(ctx context.Context, id string) (containers.Conta
 		container, err = store.Get(ctx, id)
 		return err
 	}); err != nil {
-		return containers.Container{}, err
+		return containers.Container{}, errdefs.ToGRPC(err)
 	}
 
 	return container, nil
 }
 
-func (s *Service) getTask(ctx context.Context, id string) (plugin.Task, error) {
+func (s *Service) getTask(ctx context.Context, id string) (runtime.Task, error) {
 	container, err := s.getContainer(ctx, id)
 	if err != nil {
-		return nil, grpc.Errorf(codes.InvalidArgument, "task %v not found: %s", id, err.Error())
+		return nil, err
 	}
 
 	runtime, err := s.getRuntime(container.Runtime.Name)
 	if err != nil {
-		return nil, grpc.Errorf(codes.NotFound, "task %v not found: %s", id, err.Error())
+		return nil, errdefs.ToGRPCf(err, "runtime for task %v", id)
 	}
 
 	t, err := runtime.Get(ctx, id)
@@ -505,10 +506,10 @@ func (s *Service) getTask(ctx context.Context, id string) (plugin.Task, error) {
 	return t, nil
 }
 
-func (s *Service) getRuntime(name string) (plugin.Runtime, error) {
+func (s *Service) getRuntime(name string) (runtime.Runtime, error) {
 	runtime, ok := s.runtimes[name]
 	if !ok {
-		return nil, fmt.Errorf("unknown runtime %q", name)
+		return nil, grpc.Errorf(codes.NotFound, "unknown runtime %q", name)
 	}
 	return runtime, nil
 }

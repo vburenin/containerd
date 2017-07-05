@@ -8,8 +8,8 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/metadata"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
 )
@@ -33,7 +33,7 @@ var namespacesCreateCommand = cli.Command{
 	Action: func(clicontext *cli.Context) error {
 		var (
 			ctx               = context.Background()
-			namespace, labels = namespaceWithLabelArgs(clicontext)
+			namespace, labels = objectWithLabelArgs(clicontext)
 		)
 
 		if namespace == "" {
@@ -53,27 +53,6 @@ var namespacesCreateCommand = cli.Command{
 	},
 }
 
-func namespaceWithLabelArgs(clicontext *cli.Context) (string, map[string]string) {
-	var (
-		namespace    = clicontext.Args().First()
-		labelStrings = clicontext.Args().Tail()
-		labels       = make(map[string]string, len(labelStrings))
-	)
-
-	for _, label := range labelStrings {
-		parts := strings.SplitN(label, "=", 2)
-		key := parts[0]
-		value := "true"
-		if len(parts) > 1 {
-			value = parts[1]
-		}
-
-		labels[key] = value
-	}
-
-	return namespace, labels
-}
-
 var namespacesSetLabelsCommand = cli.Command{
 	Name:        "set-labels",
 	Usage:       "Set and clear labels for a namespace.",
@@ -83,7 +62,7 @@ var namespacesSetLabelsCommand = cli.Command{
 	Action: func(clicontext *cli.Context) error {
 		var (
 			ctx               = context.Background()
-			namespace, labels = namespaceWithLabelArgs(clicontext)
+			namespace, labels = objectWithLabelArgs(clicontext)
 		)
 
 		namespaces, err := getNamespacesService(clicontext)
@@ -183,7 +162,7 @@ var namespacesRemoveCommand = cli.Command{
 
 		for _, target := range clicontext.Args() {
 			if err := namespaces.Delete(ctx, target); err != nil {
-				if !metadata.IsNotFound(err) {
+				if !errdefs.IsNotFound(err) {
 					if exitErr == nil {
 						exitErr = errors.Wrapf(err, "unable to delete %v", target)
 					}

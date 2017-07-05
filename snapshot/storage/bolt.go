@@ -6,7 +6,7 @@ import (
 	"fmt"
 
 	"github.com/boltdb/bolt"
-	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/snapshot"
 	db "github.com/containerd/containerd/snapshot/storage/proto"
 	"github.com/gogo/protobuf/proto"
@@ -129,15 +129,15 @@ func CreateActive(ctx context.Context, key, parent string, readonly bool) (a Act
 			}
 
 			if parentS.Kind != db.KindCommitted {
-				return errors.Wrap(snapshot.ErrSnapshotNotCommitted, "parent is not committed snapshot")
+				return errors.Wrap(errdefs.ErrInvalidArgument, "parent is not committed snapshot")
 			}
 		}
 		b := bkt.Get([]byte(key))
 		if len(b) != 0 {
-			return snapshot.ErrSnapshotExist
+			return errors.Wrapf(errdefs.ErrAlreadyExists, "snapshot %v", key)
 		}
 
-		id, err := nextSequence(ctx)
+		id, err := bkt.NextSequence()
 		if err != nil {
 			return errors.Wrap(err, "unable to get identifier")
 		}
@@ -183,7 +183,7 @@ func GetActive(ctx context.Context, key string) (a Active, err error) {
 	err = withBucket(ctx, func(ctx context.Context, bkt, pbkt *bolt.Bucket) error {
 		b := bkt.Get([]byte(key))
 		if len(b) == 0 {
-			return snapshot.ErrSnapshotNotExist
+			return errors.Wrapf(errdefs.ErrNotFound, "snapshot %v", key)
 		}
 
 		var ss db.Snapshot
@@ -191,7 +191,7 @@ func GetActive(ctx context.Context, key string) (a Active, err error) {
 			return errors.Wrap(err, "failed to unmarshal snapshot")
 		}
 		if ss.Kind != db.KindActive {
-			return snapshot.ErrSnapshotNotActive
+			return errors.Wrapf(errdefs.ErrFailedPrecondition, "requested snapshot %v not active", key)
 		}
 
 		a.ID = fmt.Sprintf("%d", ss.ID)
@@ -225,7 +225,7 @@ func Remove(ctx context.Context, key string) (id string, k snapshot.Kind, err er
 		var ss db.Snapshot
 		b := bkt.Get([]byte(key))
 		if len(b) == 0 {
-			return snapshot.ErrSnapshotNotExist
+			return errors.Wrapf(errdefs.ErrNotFound, "snapshot %v", key)
 		}
 
 		if err := proto.Unmarshal(b, &ss); err != nil {
@@ -273,7 +273,7 @@ func CommitActive(ctx context.Context, key, name string, usage snapshot.Usage) (
 	err = withBucket(ctx, func(ctx context.Context, bkt, pbkt *bolt.Bucket) error {
 		b := bkt.Get([]byte(name))
 		if len(b) != 0 {
-			return errors.Wrap(snapshot.ErrSnapshotExist, "committed name already exists")
+			return errors.Wrapf(errdefs.ErrAlreadyExists, "committed snapshot %v", name)
 		}
 
 		var ss db.Snapshot
@@ -281,7 +281,7 @@ func CommitActive(ctx context.Context, key, name string, usage snapshot.Usage) (
 			return errors.Wrap(err, "failed to get active snapshot")
 		}
 		if ss.Kind != db.KindActive {
-			return snapshot.ErrSnapshotNotActive
+			return errors.Wrapf(errdefs.ErrFailedPrecondition, "snapshot %v is not active", name)
 		}
 		if ss.Readonly {
 			return errors.Errorf("active snapshot is readonly")
@@ -298,6 +298,17 @@ func CommitActive(ctx context.Context, key, name string, usage snapshot.Usage) (
 		if err := bkt.Delete([]byte(key)); err != nil {
 			return errors.Wrap(err, "failed to delete active")
 		}
+		if ss.Parent != "" {
+			var ps db.Snapshot
+			if err := getSnapshot(bkt, ss.Parent, &ps); err != nil {
+				return errors.Wrap(err, "failed to get parent snapshot")
+			}
+
+			// Updates parent back link to use new key
+			if err := pbkt.Put(parentKey(ps.ID, ss.ID), []byte(name)); err != nil {
+				return errors.Wrap(err, "failed to update parent link")
+			}
+		}
 
 		id = fmt.Sprintf("%d", ss.ID)
 
@@ -310,68 +321,28 @@ func CommitActive(ctx context.Context, key, name string, usage snapshot.Usage) (
 	return
 }
 
-// nextSequence maintains the snapshot ids in the same space across namespaces
-// to avoid collisions on the filesystem, which is typically not namespace
-// aware. This will also be useful to ensure that snapshots can be used across
-// namespaces in the future, by projecting parent relationships into an
-// alternate namespace without fixing up identifiers.
-func nextSequence(ctx context.Context) (uint64, error) {
-	t, ok := ctx.Value(transactionKey{}).(*boltFileTransactor)
-	if !ok {
-		return 0, ErrNoTransaction
-	}
-
-	bkt := t.tx.Bucket(bucketKeyStorageVersion)
-	if bkt == nil {
-		return 0, errors.New("version bucket required for sequence")
-	}
-
-	return bkt.NextSequence()
-}
-
 func withBucket(ctx context.Context, fn func(context.Context, *bolt.Bucket, *bolt.Bucket) error) error {
-	namespace, err := namespaces.NamespaceRequired(ctx)
-	if err != nil {
-		return err
-	}
 	t, ok := ctx.Value(transactionKey{}).(*boltFileTransactor)
 	if !ok {
 		return ErrNoTransaction
 	}
-	nbkt := t.tx.Bucket(bucketKeyStorageVersion)
-	if nbkt == nil {
-		return errors.Wrap(snapshot.ErrSnapshotNotExist, "bucket does not exist")
-	}
-
-	bkt := nbkt.Bucket([]byte(namespace))
+	bkt := t.tx.Bucket(bucketKeyStorageVersion)
 	if bkt == nil {
-		return errors.Wrap(snapshot.ErrSnapshotNotExist, "namespace not available in snapshotter")
+		return errors.Wrap(errdefs.ErrNotFound, "bucket does not exist")
 	}
-
 	return fn(ctx, bkt.Bucket(bucketKeySnapshot), bkt.Bucket(bucketKeyParents))
 }
 
 func createBucketIfNotExists(ctx context.Context, fn func(context.Context, *bolt.Bucket, *bolt.Bucket) error) error {
-	namespace, err := namespaces.NamespaceRequired(ctx)
-	if err != nil {
-		return err
-	}
-
 	t, ok := ctx.Value(transactionKey{}).(*boltFileTransactor)
 	if !ok {
 		return ErrNoTransaction
 	}
 
-	nbkt, err := t.tx.CreateBucketIfNotExists(bucketKeyStorageVersion)
+	bkt, err := t.tx.CreateBucketIfNotExists(bucketKeyStorageVersion)
 	if err != nil {
 		return errors.Wrap(err, "failed to create version bucket")
 	}
-
-	bkt, err := nbkt.CreateBucketIfNotExists([]byte(namespace))
-	if err != nil {
-		return err
-	}
-
 	sbkt, err := bkt.CreateBucketIfNotExists(bucketKeySnapshot)
 	if err != nil {
 		return errors.Wrap(err, "failed to create snapshots bucket")
@@ -409,7 +380,7 @@ func parents(bkt *bolt.Bucket, parent *db.Snapshot) (parents []string, err error
 func getSnapshot(bkt *bolt.Bucket, key string, ss *db.Snapshot) error {
 	b := bkt.Get([]byte(key))
 	if len(b) == 0 {
-		return snapshot.ErrSnapshotNotExist
+		return errors.Wrapf(errdefs.ErrNotFound, "snapshot %v", key)
 	}
 	if err := proto.Unmarshal(b, ss); err != nil {
 		return errors.Wrap(err, "failed to unmarshal snapshot")

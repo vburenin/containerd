@@ -1,6 +1,10 @@
-package plugin
+package runtime
 
-import "context"
+import (
+	"context"
+
+	"github.com/gogo/protobuf/types"
+)
 
 type TaskInfo struct {
 	ID          string
@@ -25,20 +29,22 @@ type Task interface {
 	Kill(context.Context, uint32, uint32, bool) error
 	// Exec adds a process into the container
 	Exec(context.Context, ExecOpts) (Process, error)
-	// Processes returns all pids for the container
-	Processes(context.Context) ([]uint32, error)
+	// Pids returns all pids for the task
+	Pids(context.Context) ([]uint32, error)
 	// Pty resizes the processes pty/console
 	ResizePty(context.Context, uint32, ConsoleSize) error
 	// CloseStdin closes the processes stdin
 	CloseIO(context.Context, uint32) error
 	// Checkpoint checkpoints a container to an image with live system data
-	Checkpoint(context.Context, string, map[string]string) error
+	Checkpoint(context.Context, string, *types.Any) error
 	// DeleteProcess deletes a specific exec process via the pid
 	DeleteProcess(context.Context, uint32) (*Exit, error)
+	// Update sets the provided resources to a running task
+	Update(context.Context, *types.Any) error
 }
 
 type ExecOpts struct {
-	Spec []byte
+	Spec *types.Any
 	IO   IO
 }
 

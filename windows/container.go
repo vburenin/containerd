@@ -9,9 +9,11 @@ import (
 	"sync"
 	"time"
 
+	events "github.com/containerd/containerd/api/services/events/v1"
 	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/runtime"
 	"github.com/containerd/containerd/windows/hcs"
+	"github.com/gogo/protobuf/types"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 	winsys "golang.org/x/sys/windows"
@@ -19,7 +21,7 @@ import (
 
 var ErrLoadedContainer = errors.New("loaded container can only be terminated")
 
-type eventCallback func(id string, evType plugin.EventType, pid, exitStatus uint32, exitedAt time.Time)
+type eventCallback func(id string, evType events.RuntimeEvent_EventType, pid, exitStatus uint32, exitedAt time.Time)
 
 func loadContainers(ctx context.Context, h *hcs.HCS, sendEvent eventCallback) ([]*container, error) {
 	hCtr, err := h.LoadContainers(ctx)
@@ -31,7 +33,7 @@ func loadContainers(ctx context.Context, h *hcs.HCS, sendEvent eventCallback) ([
 	for _, c := range hCtr {
 		containers = append(containers, &container{
 			ctr:       c,
-			status:    plugin.RunningStatus,
+			status:    runtime.RunningStatus,
 			sendEvent: sendEvent,
 		})
 	}
@@ -39,7 +41,7 @@ func loadContainers(ctx context.Context, h *hcs.HCS, sendEvent eventCallback) ([
 	return containers, nil
 }
 
-func newContainer(ctx context.Context, h *hcs.HCS, id string, spec RuntimeSpec, io plugin.IO, sendEvent eventCallback) (*container, error) {
+func newContainer(ctx context.Context, h *hcs.HCS, id string, spec RuntimeSpec, io runtime.IO, sendEvent eventCallback) (*container, error) {
 	cio, err := hcs.NewIO(io.Stdin, io.Stdout, io.Stderr, io.Terminal)
 	if err != nil {
 		return nil, err
@@ -49,11 +51,11 @@ func newContainer(ctx context.Context, h *hcs.HCS, id string, spec RuntimeSpec, 
 	if err != nil {
 		return nil, err
 	}
-	sendEvent(id, plugin.CreateEvent, hcsCtr.Pid(), 0, time.Time{})
+	sendEvent(id, events.RuntimeEvent_CREATE, hcsCtr.Pid(), 0, time.Time{})
 
 	return &container{
 		ctr:       hcsCtr,
-		status:    plugin.CreatedStatus,
+		status:    runtime.CreatedStatus,
 		sendEvent: sendEvent,
 	}, nil
 }
@@ -62,12 +64,12 @@ type container struct {
 	sync.Mutex
 
 	ctr       *hcs.Container
-	status    plugin.Status
+	status    runtime.Status
 	sendEvent eventCallback
 }
 
-func (c *container) Info() plugin.TaskInfo {
-	return plugin.TaskInfo{
+func (c *container) Info() runtime.TaskInfo {
+	return runtime.TaskInfo{
 		ID:      c.ctr.ID(),
 		Runtime: runtimeName,
 	}
@@ -83,8 +85,8 @@ func (c *container) Start(ctx context.Context) error {
 		return err
 	}
 
-	c.setStatus(plugin.RunningStatus)
-	c.sendEvent(c.ctr.ID(), plugin.StartEvent, c.ctr.Pid(), 0, time.Time{})
+	c.setStatus(runtime.RunningStatus)
+	c.sendEvent(c.ctr.ID(), events.RuntimeEvent_START, c.ctr.Pid(), 0, time.Time{})
 
 	// Wait for our process to terminate
 	go func() {
@@ -92,8 +94,8 @@ func (c *container) Start(ctx context.Context) error {
 		if err != nil {
 			log.G(ctx).Debug(err)
 		}
-		c.setStatus(plugin.StoppedStatus)
-		c.sendEvent(c.ctr.ID(), plugin.ExitEvent, c.ctr.Pid(), ec, c.ctr.Processes()[0].ExitedAt())
+		c.setStatus(runtime.StoppedStatus)
+		c.sendEvent(c.ctr.ID(), events.RuntimeEvent_EXIT, c.ctr.Pid(), ec, c.ctr.Processes()[0].ExitedAt())
 	}()
 
 	return nil
@@ -113,8 +115,8 @@ func (c *container) Resume(ctx context.Context) error {
 	return c.ctr.Resume()
 }
 
-func (c *container) State(ctx context.Context) (plugin.State, error) {
-	return plugin.State{
+func (c *container) State(ctx context.Context) (runtime.State, error) {
+	return runtime.State{
 		Pid:    c.Pid(),
 		Status: c.Status(),
 	}, nil
@@ -127,7 +129,7 @@ func (c *container) Kill(ctx context.Context, signal uint32, pid uint32, all boo
 	return c.ctr.Stop(ctx)
 }
 
-func (c *container) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Process, error) {
+func (c *container) Exec(ctx context.Context, opts runtime.ExecOpts) (runtime.Process, error) {
 	if c.ctr.Pid() == 0 {
 		return nil, ErrLoadedContainer
 	}
@@ -138,11 +140,11 @@ func (c *container) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Proc
 	}
 
 	var procSpec specs.Process
-	if err := json.Unmarshal(opts.Spec, &procSpec); err != nil {
+	if err := json.Unmarshal(opts.Spec.Value, &procSpec); err != nil {
 		return nil, errors.Wrap(err, "failed to unmarshal oci spec")
 	}
 
-	p, err := c.ctr.AddProcess(ctx, procSpec, pio)
+	p, err := c.ctr.AddProcess(ctx, &procSpec, pio)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +154,7 @@ func (c *container) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Proc
 		if err != nil {
 			log.G(ctx).Debug(err)
 		}
-		c.sendEvent(c.ctr.ID(), plugin.ExitEvent, p.Pid(), ec, p.ExitedAt())
+		c.sendEvent(c.ctr.ID(), events.RuntimeEvent_EXEC_ADDED, p.Pid(), ec, p.ExitedAt())
 	}()
 
 	return &process{p}, nil
@@ -162,11 +164,11 @@ func (c *container) CloseIO(ctx context.Context, pid uint32) error {
 	return c.ctr.CloseIO(ctx, pid)
 }
 
-func (c *container) ResizePty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
+func (c *container) ResizePty(ctx context.Context, pid uint32, size runtime.ConsoleSize) error {
 	return c.ctr.ResizePty(ctx, pid, size)
 }
 
-func (c *container) Status() plugin.Status {
+func (c *container) Status() runtime.Status {
 	return c.getStatus()
 }
 
@@ -174,25 +176,23 @@ func (c *container) Pid() uint32 {
 	return c.ctr.Pid()
 }
 
-func (c *container) Processes(ctx context.Context) ([]uint32, error) {
+func (c *container) Pids(ctx context.Context) ([]uint32, error) {
 	pl, err := c.ctr.ProcessList()
 	if err != nil {
 		return nil, err
 	}
-
 	pids := make([]uint32, 0, len(pl))
 	for _, p := range pl {
 		pids = append(pids, p.ProcessId)
 	}
-
 	return pids, nil
 }
 
-func (c *container) Checkpoint(ctx context.Context, _ string, _ map[string]string) error {
+func (c *container) Checkpoint(ctx context.Context, _ string, _ *types.Any) error {
 	return fmt.Errorf("Windows containers do not support checkpoint")
 }
 
-func (c *container) DeleteProcess(ctx context.Context, pid uint32) (*plugin.Exit, error) {
+func (c *container) DeleteProcess(ctx context.Context, pid uint32) (*runtime.Exit, error) {
 	var process *hcs.Process
 	for _, p := range c.ctr.Processes() {
 		if p.Pid() == pid {
@@ -208,19 +208,23 @@ func (c *container) DeleteProcess(ctx context.Context, pid uint32) (*plugin.Exit
 		return nil, err
 	}
 	process.Delete()
-	return &plugin.Exit{
+	return &runtime.Exit{
 		Status:    ec,
 		Timestamp: process.ExitedAt(),
 	}, nil
 }
 
-func (c *container) setStatus(status plugin.Status) {
+func (c *container) Update(ctx context.Context, spec *types.Any) error {
+	return fmt.Errorf("Windows containers do not support update")
+}
+
+func (c *container) setStatus(status runtime.Status) {
 	c.Lock()
 	c.status = status
 	c.Unlock()
 }
 
-func (c *container) getStatus() plugin.Status {
+func (c *container) getStatus() runtime.Status {
 	c.Lock()
 	defer c.Unlock()
 	return c.status

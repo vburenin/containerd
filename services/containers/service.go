@@ -1,11 +1,15 @@
 package containers
 
 import (
+	"strings"
+
 	"github.com/boltdb/bolt"
 	api "github.com/containerd/containerd/api/services/containers/v1"
 	eventsapi "github.com/containerd/containerd/api/services/events/v1"
 	"github.com/containerd/containerd/containers"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/events"
+	"github.com/containerd/containerd/filters"
 	"github.com/containerd/containerd/metadata"
 	"github.com/containerd/containerd/plugin"
 	"github.com/golang/protobuf/ptypes/empty"
@@ -49,31 +53,40 @@ func (s *Service) Register(server *grpc.Server) error {
 func (s *Service) Get(ctx context.Context, req *api.GetContainerRequest) (*api.GetContainerResponse, error) {
 	var resp api.GetContainerResponse
 
-	return &resp, s.withStoreView(ctx, func(ctx context.Context, store containers.Store) error {
+	return &resp, errdefs.ToGRPC(s.withStoreView(ctx, func(ctx context.Context, store containers.Store) error {
 		container, err := store.Get(ctx, req.ID)
 		if err != nil {
-			return mapGRPCError(err, req.ID)
+			return err
 		}
 		containerpb := containerToProto(&container)
 		resp.Container = containerpb
 
 		return nil
-	})
+	}))
 }
 
 func (s *Service) List(ctx context.Context, req *api.ListContainersRequest) (*api.ListContainersResponse, error) {
 	var resp api.ListContainersResponse
 
-	return &resp, s.withStoreView(ctx, func(ctx context.Context, store containers.Store) error {
-		containers, err := store.List(ctx, req.Filter)
+	var fs []filters.Filter
+	for _, s := range req.Filters {
+		f, err := filters.Parse(s)
 		if err != nil {
-			return mapGRPCError(err, "")
+			return nil, grpc.Errorf(codes.InvalidArgument, err.Error())
+		}
+
+		fs = append(fs, f)
+	}
+
+	return &resp, errdefs.ToGRPC(s.withStoreView(ctx, func(ctx context.Context, store containers.Store) error {
+		containers, err := store.List(ctx, fs...)
+		if err != nil {
+			return err
 		}
 
 		resp.Containers = containersToProto(containers)
 		return nil
-	})
-
+	}))
 }
 
 func (s *Service) Create(ctx context.Context, req *api.CreateContainerRequest) (*api.CreateContainerResponse, error) {
@@ -84,14 +97,14 @@ func (s *Service) Create(ctx context.Context, req *api.CreateContainerRequest) (
 
 		created, err := store.Create(ctx, container)
 		if err != nil {
-			return mapGRPCError(err, req.Container.ID)
+			return err
 		}
 
 		resp.Container = containerToProto(&created)
 
 		return nil
 	}); err != nil {
-		return &resp, err
+		return &resp, errdefs.ToGRPC(err)
 	}
 	if err := s.emit(ctx, "/containers/create", &eventsapi.ContainerCreate{
 		ContainerID: resp.Container.ID,
@@ -108,18 +121,20 @@ func (s *Service) Create(ctx context.Context, req *api.CreateContainerRequest) (
 }
 
 func (s *Service) Update(ctx context.Context, req *api.UpdateContainerRequest) (*api.UpdateContainerResponse, error) {
-	var resp api.UpdateContainerResponse
+	var (
+		resp     api.UpdateContainerResponse
+		incoming = containerFromProto(&req.Container)
+	)
 
 	if err := s.withStoreUpdate(ctx, func(ctx context.Context, store containers.Store) error {
-		container := containerFromProto(&req.Container)
 
-		current, err := store.Get(ctx, container.ID)
+		container, err := store.Get(ctx, incoming.ID)
 		if err != nil {
-			return mapGRPCError(err, container.ID)
+			return err
 		}
 
-		if current.ID != container.ID {
-			return grpc.Errorf(codes.InvalidArgument, "container ids must match: %v != %v", current.ID, container.ID)
+		if container.ID != incoming.ID {
+			return grpc.Errorf(codes.InvalidArgument, "container ids must match: %v != %v", container.ID, incoming.ID)
 		}
 
 		// apply the field mask. If you update this code, you better follow the
@@ -127,37 +142,42 @@ func (s *Service) Update(ctx context.Context, req *api.UpdateContainerRequest) (
 		// is, do not update this code.
 		if req.UpdateMask != nil && len(req.UpdateMask.Paths) > 0 {
 			for _, path := range req.UpdateMask.Paths {
+				if strings.HasPrefix(path, "labels.") {
+					key := strings.TrimPrefix(path, "labels.")
+					container.Labels[key] = incoming.Labels[key]
+					continue
+				}
+
 				switch path {
 				case "labels":
-					current.Labels = container.Labels
+					container.Labels = incoming.Labels
 				case "image":
-					current.Image = container.Image
+					container.Image = incoming.Image
 				case "runtime":
 					// TODO(stevvooe): Should this actually be allowed?
-					current.Runtime = container.Runtime
+					container.Runtime = incoming.Runtime
 				case "spec":
-					current.Spec = container.Spec
+					container.Spec = incoming.Spec
 				case "rootfs":
-					current.RootFS = container.RootFS
+					container.RootFS = incoming.RootFS
 				default:
 					return grpc.Errorf(codes.InvalidArgument, "cannot update %q field", path)
 				}
 			}
 		} else {
 			// no field mask present, just replace everything
-			current = container
+			container = incoming
 		}
 
-		created, err := store.Update(ctx, container)
+		updated, err := store.Update(ctx, container)
 		if err != nil {
-			return mapGRPCError(err, req.Container.ID)
+			return err
 		}
 
-		resp.Container = containerToProto(&created)
-
+		resp.Container = containerToProto(&updated)
 		return nil
 	}); err != nil {
-		return &resp, err
+		return &resp, errdefs.ToGRPC(err)
 	}
 
 	if err := s.emit(ctx, "/containers/update", &eventsapi.ContainerUpdate{
@@ -174,9 +194,9 @@ func (s *Service) Update(ctx context.Context, req *api.UpdateContainerRequest) (
 
 func (s *Service) Delete(ctx context.Context, req *api.DeleteContainerRequest) (*empty.Empty, error) {
 	if err := s.withStoreUpdate(ctx, func(ctx context.Context, store containers.Store) error {
-		return mapGRPCError(store.Delete(ctx, req.ID), req.ID)
+		return store.Delete(ctx, req.ID)
 	}); err != nil {
-		return &empty.Empty{}, mapGRPCError(err, req.ID)
+		return &empty.Empty{}, errdefs.ToGRPC(err)
 	}
 
 	if err := s.emit(ctx, "/containers/delete", &eventsapi.ContainerDelete{

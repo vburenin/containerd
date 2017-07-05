@@ -41,9 +41,11 @@ service Tasks {
 
 	rpc Resume(ResumeTaskRequest) returns (google.protobuf.Empty);
 
-	rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
+	rpc ListPids(ListPidsRequest) returns (ListPidsResponse);
 
 	rpc Checkpoint(CheckpointTaskRequest) returns (CheckpointTaskResponse);
+
+	rpc Update(UpdateTaskRequest) returns (google.protobuf.Empty);
 }
 
 message CreateTaskRequest {
@@ -70,6 +72,8 @@ message CreateTaskRequest {
 	bool terminal = 7;
 
 	containerd.types.Descriptor checkpoint = 8;
+
+	google.protobuf.Any options = 9;
 }
 
 message CreateTaskResponse {
@@ -171,20 +175,25 @@ message ResumeTaskRequest {
 	string container_id = 1;
 }
 
-message ListProcessesRequest {
+message ListPidsRequest {
 	string container_id = 1;
 }
 
-message ListProcessesResponse{
-	repeated containerd.v1.types.Process processes = 1;
+message ListPidsResponse{
+	repeated uint32 pids = 1;
 }
 
 message CheckpointTaskRequest {
 	string container_id = 1;
 	string parent_checkpoint = 2 [(gogoproto.customtype) = "github.com/opencontainers/go-digest.Digest", (gogoproto.nullable) = false];
-	map<string, string> options = 3;
+	google.protobuf.Any options = 3;
 }
 
 message CheckpointTaskResponse {
 	repeated containerd.types.Descriptor descriptors = 1;
+}
+
+message UpdateTaskRequest {
+	string container_id = 1;
+	google.protobuf.Any resources = 2;
 }

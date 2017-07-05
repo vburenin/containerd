@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"runtime"
+	goruntime "runtime"
 	"strings"
 	"syscall"
 
@@ -15,8 +15,8 @@ import (
 	"github.com/containerd/containerd/api/services/tasks/v1"
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/events"
-	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/rootfs"
+	"github.com/containerd/containerd/runtime"
 	"github.com/opencontainers/image-spec/specs-go/v1"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"google.golang.org/grpc"
@@ -57,6 +57,7 @@ type Task interface {
 	Resize(ctx context.Context, w, h uint32) error
 	IO() *IO
 	Checkpoint(context.Context, ...CheckpointOpts) (v1.Descriptor, error)
+	Update(context.Context, ...UpdateTaskOpts) error
 }
 
 type Process interface {
@@ -114,7 +115,7 @@ func (t *task) Kill(ctx context.Context, s syscall.Signal) error {
 		},
 	})
 	if err != nil {
-		if strings.Contains(grpc.ErrorDesc(err), plugin.ErrProcessExited.Error()) {
+		if strings.Contains(grpc.ErrorDesc(err), runtime.ErrProcessExited.Error()) {
 			return ErrProcessExited
 		}
 		return err
@@ -212,17 +213,13 @@ func (t *task) Exec(ctx context.Context, spec *specs.Process, ioCreate IOCreatio
 }
 
 func (t *task) Processes(ctx context.Context) ([]uint32, error) {
-	response, err := t.client.TaskService().ListProcesses(ctx, &tasks.ListProcessesRequest{
+	response, err := t.client.TaskService().ListPids(ctx, &tasks.ListPidsRequest{
 		ContainerID: t.containerID,
 	})
 	if err != nil {
 		return nil, err
 	}
-	var out []uint32
-	for _, p := range response.Processes {
-		out = append(out, p.Pid)
-	}
-	return out, nil
+	return response.Pids, nil
 }
 
 func (t *task) CloseIO(ctx context.Context, opts ...IOCloserOpts) error {
@@ -251,15 +248,9 @@ func (t *task) Resize(ctx context.Context, w, h uint32) error {
 	return err
 }
 
-func WithExit(r *tasks.CheckpointTaskRequest) error {
-	r.Options["exit"] = "true"
-	return nil
-}
-
 func (t *task) Checkpoint(ctx context.Context, opts ...CheckpointOpts) (d v1.Descriptor, err error) {
 	request := &tasks.CheckpointTaskRequest{
 		ContainerID: t.containerID,
-		Options:     make(map[string]string),
 	}
 	for _, o := range opts {
 		if err := o(request); err != nil {
@@ -292,6 +283,21 @@ func (t *task) Checkpoint(ctx context.Context, opts ...CheckpointOpts) (d v1.Des
 	return t.writeIndex(ctx, &index)
 }
 
+type UpdateTaskOpts func(context.Context, *Client, *tasks.UpdateTaskRequest) error
+
+func (t *task) Update(ctx context.Context, opts ...UpdateTaskOpts) error {
+	request := &tasks.UpdateTaskRequest{
+		ContainerID: t.containerID,
+	}
+	for _, o := range opts {
+		if err := o(ctx, t.client, request); err != nil {
+			return err
+		}
+	}
+	_, err := t.client.TaskService().Update(ctx, request)
+	return err
+}
+
 func (t *task) checkpointTask(ctx context.Context, index *v1.Index, request *tasks.CheckpointTaskRequest) error {
 	response, err := t.client.TaskService().Checkpoint(ctx, request)
 	if err != nil {
@@ -304,8 +310,8 @@ func (t *task) checkpointTask(ctx context.Context, index *v1.Index, request *tas
 			Size:      d.Size_,
 			Digest:    d.Digest,
 			Platform: &v1.Platform{
-				OS:           runtime.GOOS,
-				Architecture: runtime.GOARCH,
+				OS:           goruntime.GOOS,
+				Architecture: goruntime.GOARCH,
 			},
 		})
 	}
@@ -318,8 +324,8 @@ func (t *task) checkpointRWSnapshot(ctx context.Context, index *v1.Index, id str
 		return err
 	}
 	rw.Platform = &v1.Platform{
-		OS:           runtime.GOOS,
-		Architecture: runtime.GOARCH,
+		OS:           goruntime.GOOS,
+		Architecture: goruntime.GOARCH,
 	}
 	index.Manifests = append(index.Manifests, rw)
 	return nil

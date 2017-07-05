@@ -8,6 +8,7 @@ import "gogoproto/gogo.proto";
 import "google/protobuf/timestamp.proto";
 import "github.com/containerd/containerd/api/types/mount.proto";
 import "github.com/containerd/containerd/api/types/task/task.proto";
+import "github.com/containerd/containerd/api/services/events/v1/runtime.proto";
 
 option go_package = "github.com/containerd/containerd/linux/shim/v1;shim";
 
@@ -27,7 +28,7 @@ service Shim {
 
 	rpc DeleteProcess(DeleteProcessRequest) returns (DeleteResponse);
 
-	rpc ListProcesses(ListProcessesRequest) returns (ListProcessesResponse);
+	rpc ListPids(ListPidsRequest) returns (ListPidsResponse);
 
 	rpc Pause(google.protobuf.Empty) returns (google.protobuf.Empty);
 
@@ -35,7 +36,7 @@ service Shim {
 
 	rpc Checkpoint(CheckpointTaskRequest) returns (google.protobuf.Empty);
 
-	rpc Stream(StreamEventsRequest) returns (stream Event);
+	rpc Stream(StreamEventsRequest) returns (stream containerd.services.events.v1.RuntimeEvent);
 
 	rpc Kill(KillRequest) returns (google.protobuf.Empty);
 
@@ -47,6 +48,8 @@ service Shim {
 
 	// ShimInfo returns information about the shim.
 	rpc ShimInfo(google.protobuf.Empty) returns (ShimInfoResponse);
+
+	rpc Update(UpdateTaskRequest) returns (google.protobuf.Empty);
 }
 
 message CreateTaskRequest {
@@ -60,6 +63,7 @@ message CreateTaskRequest {
 	string stderr = 8;
 	string checkpoint = 9;
 	string parent_checkpoint = 10;
+	google.protobuf.Any options = 11;
 }
 
 message CreateTaskResponse {
@@ -117,17 +121,17 @@ message CloseIORequest {
 	bool stdin = 2;
 }
 
-message ListProcessesRequest {
+message ListPidsRequest {
 	string id = 1;
 }
 
-message ListProcessesResponse{
-	repeated containerd.v1.types.Process processes = 1;
+message ListPidsResponse{
+	repeated uint32 pids = 1;
 }
 
 message CheckpointTaskRequest {
 	string path = 1;
-	map<string, string> options = 2;
+	google.protobuf.Any options = 2;
 }
 
 message ShimInfoResponse {
@@ -137,20 +141,6 @@ message ShimInfoResponse {
 message StreamEventsRequest {
 }
 
-message Event {
-	string id = 1;
-
-	enum EventType {
-		EXIT = 0;
-		OOM = 1;
-		CREATE = 2;
-		START = 3;
-		EXEC_ADDED = 4;
-		PAUSED = 5;
-	}
-
-	EventType type = 2;
-	uint32 pid = 3;
-	uint32 exit_status = 4;
-	google.protobuf.Timestamp exited_at = 5 [(gogoproto.stdtime) = true, (gogoproto.nullable) = false];
+message UpdateTaskRequest {
+	google.protobuf.Any resources = 1;
 }

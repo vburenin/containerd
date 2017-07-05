@@ -16,7 +16,7 @@ import (
 	"github.com/Microsoft/hcsshim"
 	"github.com/Sirupsen/logrus"
 	"github.com/containerd/containerd/log"
-	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/runtime"
 	"github.com/containerd/containerd/windows/pid"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -216,7 +216,7 @@ func (c *Container) CloseIO(ctx context.Context, pid uint32) error {
 	return proc.CloseStdin()
 }
 
-func (c *Container) ResizePty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
+func (c *Container) ResizePty(ctx context.Context, pid uint32, size runtime.ConsoleSize) error {
 	var proc *Process
 	c.Lock()
 	for _, p := range c.processes {
@@ -303,7 +303,7 @@ func (c *Container) GetConfiguration() Configuration {
 	return c.conf
 }
 
-func (c *Container) AddProcess(ctx context.Context, spec specs.Process, io *IO) (*Process, error) {
+func (c *Container) AddProcess(ctx context.Context, spec *specs.Process, io *IO) (*Process, error) {
 	if len(c.processes) == 0 {
 		return nil, errors.New("container not started")
 	}
@@ -311,7 +311,7 @@ func (c *Container) AddProcess(ctx context.Context, spec specs.Process, io *IO) 
 	return c.addProcess(ctx, spec, io)
 }
 
-func (c *Container) addProcess(ctx context.Context, spec specs.Process, pio *IO) (*Process, error) {
+func (c *Container) addProcess(ctx context.Context, spec *specs.Process, pio *IO) (*Process, error) {
 	// If we don't have a process yet, reused the container pid
 	var pid uint32
 	if len(c.processes) == 0 {
