@@ -7,14 +7,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/console"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/containers"
+	"github.com/containerd/containerd/plapi/client/events"
 	"github.com/containerd/containerd/plapi/client/interaction"
 	"github.com/containerd/containerd/plapi/client/logging"
 	"github.com/containerd/containerd/plapi/client/scopes"
 	"github.com/containerd/containerd/plapi/client/tasks"
+	vwevents "github.com/containerd/containerd/plapi/events"
 	"github.com/containerd/containerd/plapi/models"
 	"github.com/containerd/containerd/plapi/mounts"
 	"github.com/containerd/containerd/plugin"
@@ -35,20 +36,6 @@ func (s State) Status() plugin.Status {
 	return s.status
 }
 
-type VicTask struct {
-	client *client.PortLayer
-	comm   *plugin.IO
-	con    console.Console
-
-	tty bool
-	mu  sync.Mutex
-
-	events chan *plugin.Event
-
-	id          string
-	portLayerId string
-}
-
 const (
 	AnnotationStdErrKey     = "containerd.stderr"
 	AnnotationStdOutKey     = "containerd.stdout"
@@ -67,13 +54,31 @@ func loadSpec(specBin []byte) (*specs.Spec, error) {
 	return &spec, nil
 }
 
+type BaseEvent struct {
+	Type        string
+	Event       string
+	ID          int
+	Detail      string
+	Ref         string
+	CreatedTime time.Time
+}
+
+type Eventer struct {
+	eventWriter func([]byte) (int, error)
+}
+
+func (e *Eventer) Write(d []byte) (int, error) {
+	return e.eventWriter(d)
+}
+
 type VicTasker struct {
-	mu     sync.Mutex
-	main   *VicProc
-	other  map[int32]*VicTask
-	events chan *plugin.Event
-	pl     *client.PortLayer
-	spec   *specs.Spec
+	mu      sync.Mutex
+	main    *VicTask
+	other   map[int32]*VicTask
+	events  chan *plugin.Event
+	pl      *client.PortLayer
+	spec    *specs.Spec
+	binSpec []byte
 
 	id      string
 	vid     string
@@ -96,6 +101,7 @@ func NewVicTasker(ctx context.Context, pl *client.PortLayer, events chan *plugin
 }
 
 func (vt *VicTasker) Create(ctx context.Context, opts plugin.CreateOpts) error {
+	vt.binSpec = opts.Spec
 	spec, err := loadSpec(opts.Spec)
 
 	if err != nil {
@@ -188,18 +194,6 @@ func (vt *VicTasker) Create(ctx context.Context, opts plugin.CreateOpts) error {
 	}
 	handle = bindResp.Payload.Handle.(string)
 
-	r1, err := vt.pl.Logging.LoggingJoin(
-		logging.NewLoggingJoinParamsWithContext(ctx).WithConfig(
-			&models.LoggingJoinConfig{
-				Handle: handle,
-			}))
-
-	if err != nil {
-		return err
-	}
-
-	handle = r1.Payload.Handle.(string)
-
 	r2, err := vt.pl.Interaction.InteractionJoin(
 		interaction.NewInteractionJoinParamsWithContext(ctx).WithConfig(
 			&models.InteractionJoinConfig{
@@ -212,8 +206,21 @@ func (vt *VicTasker) Create(ctx context.Context, opts plugin.CreateOpts) error {
 
 	handle = r2.Payload.Handle.(string)
 
+	r1, err := vt.pl.Logging.LoggingJoin(
+		logging.NewLoggingJoinParamsWithContext(ctx).WithConfig(
+			&models.LoggingJoinConfig{
+				Handle: handle,
+			}))
+
+	if err != nil {
+		return err
+	}
+
+	handle = r1.Payload.Handle.(string)
+
 	CommitHandle(ctx, vt.pl, handle)
 
+	vt.eventProcessor()
 	vt.events <- &plugin.Event{
 		ID:        vt.id,
 		Runtime:   runtimeName,
@@ -222,14 +229,47 @@ func (vt *VicTasker) Create(ctx context.Context, opts plugin.CreateOpts) error {
 		Pid:       1,
 	}
 
-	vicProc, err := NewVicProc(ctx, vt.pl, vt.root, opts)
-	if err != nil {
-		return err
-	}
-
+	vicProc := NewVicProc(vt.pl, vt.id, vt.vid, vt.root, opts)
 	vt.main = vicProc
 
 	return nil
+}
+
+func (e *VicTasker) adoptEvent(ctx context.Context, be *BaseEvent) {
+	if be.Type != "events.ContainerEvent" {
+		return
+	}
+	log.G(ctx).Debugf("Received container event: %s for %s(%s)", be.Event, be.Ref, e.id)
+	switch be.Event {
+	case vwevents.ContainerPoweredOff:
+		e.events <- &plugin.Event{
+			Type:       plugin.ExitEvent,
+			ID:         e.id,
+			Pid:        1,
+			Timestamp:  be.CreatedTime,
+			ExitStatus: 0,
+		}
+		e.main.CloseSTDIN(ctx)
+	default:
+		log.G(ctx).Warningf("Unknown event received: %s", be.Event)
+	}
+}
+
+func (vt *VicTasker) eventProcessor() {
+	ctx := context.Background()
+	eventer := &Eventer{
+		eventWriter: func(d []byte) (int, error) {
+			log.G(ctx).Debugf("Event: %s", string(d))
+			plEvent := &BaseEvent{}
+			err := json.Unmarshal(d, &plEvent)
+			if err != nil {
+				log.G(ctx).Errorf("Received event is not decoded: %s, error: %s", string(d), err)
+			}
+			vt.adoptEvent(ctx, plEvent)
+			return len(d), nil
+		},
+	}
+	go vt.pl.Events.GetEvents(events.NewGetEventsParamsWithContext(ctx), eventer)
 }
 
 func (vt *VicTasker) Restore(ctx context.Context, ci *models.ContainerInfo) error {
@@ -240,55 +280,18 @@ func (vt *VicTasker) Restore(ctx context.Context, ci *models.ContainerInfo) erro
 	vt.vid = cfg.ContainerID
 	vt.id = cfg.Annotations[AnnotationContainerdID]
 
-	c := &VicTask{
-		comm: &plugin.IO{
-			Stdout:   cfg.Annotations[AnnotationStdOutKey],
-			Stdin:    cfg.Annotations[AnnotationStdOutKey],
-			Stderr:   cfg.Annotations[AnnotationStdErrKey],
-			Terminal: cfg.Tty != nil && *cfg.Tty,
-		},
-	}
-
-	if c.id == "" {
-		c.id = c.portLayerId
-	}
-	return nil
-}
-
-func (vt *VicTasker) runIOServers(ctx context.Context) error {
-	//var socket *runc.Socket
-	//var err error
-	//
-	//if p.tty {
-	//	if socket, err = runc.NewConsoleSocket(filepath.Join(p.root, p.id, "pty.sock")); err != nil {
-	//		return err
-	//	}
-	//	con, err := socket.ReceiveMaster()
-	//	if err != nil {
-	//		return err
-	//	}
-	//
-	//	p.con = con
-	//
-	//	go func() {
-	//		stdInParams := interaction.NewContainerSetStdinParamsWithContext(ctx).WithID("tty-in")
-	//		stdInParams.WithRawStream(con)
-	//
-	//		_, e := p.client.Interaction.ContainerSetStdin(stdInParams)
-	//		if e != nil {
-	//			log.G(ctx).Errorf("Could not setup stdin channel: %s", err)
-	//		}
-	//	}()
-	//
-	//	go func() {
-	//		stdOutParams := interaction.NewContainerGetStdoutParamsWithContext(ctx).WithID("tty-out")
-	//		_, e := p.client.Interaction.ContainerGetStdout(stdOutParams, con)
-	//		if e != nil {
-	//			log.G(ctx).Errorf("Could not setup stdout channel: %s", err)
-	//		}
-	//	}()
+	//c := &VicTasker{
+	//	comm: &plugin.IO{
+	//		Stdout:   cfg.Annotations[AnnotationStdOutKey],
+	//		Stdin:    cfg.Annotations[AnnotationStdOutKey],
+	//		Stderr:   cfg.Annotations[AnnotationStdErrKey],
+	//		Terminal: cfg.Tty != nil && *cfg.Tty,
+	//	},
 	//}
-
+	//
+	//if c.id == "" {
+	//	c.id = c.vid
+	//}
 	return nil
 }
 
@@ -297,7 +300,7 @@ func (vt *VicTasker) Info() plugin.TaskInfo {
 		ID:          vt.id,
 		ContainerID: vt.id,
 		Runtime:     runtimeName,
-		Spec:        nil,
+		Spec:        vt.binSpec,
 	}
 }
 
@@ -331,6 +334,11 @@ func (vt *VicTasker) Start(ctx context.Context) error {
 	}
 
 	log.G(ctx).Infof("Container %s has started", vt.vid)
+
+	err = vt.main.RunIO()
+	if err != nil {
+		log.G(ctx).Errorf("Failed to start container IO")
+	}
 
 	vt.events <- &plugin.Event{
 		Pid:       1,
@@ -405,17 +413,23 @@ func (vt *VicTasker) Processes(ctx context.Context) ([]uint32, error) {
 	return []uint32{1}, nil
 }
 
-func (vt *VicTasker) Pty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
-	log.G(ctx).Debugf("PTY requested for %d: %s", pid, vt.id)
+func (vt *VicTasker) ResizePty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
+	log.G(ctx).Debugf("PTY requested for %d, size %dx%d: %s", pid, size.Width, size.Height, vt.id)
+	if pid == 1 {
+		return vt.main.ResizePTY(ctx, size)
+	}
 	return nil
 }
 
-func (vt *VicTasker) CloseStdin(ctx context.Context, pid uint32) error {
-	log.G(ctx).Debugf("Closing STDIN for %d: %s", pid, vt.id)
+func (vt *VicTasker) CloseIO(ctx context.Context, pid uint32) error {
+	log.G(ctx).Debugf("Closing IO for %d: %s", pid, vt.id)
+	if pid == 1 {
+		return vt.main.CloseSTDIN(ctx)
+	}
 	return nil
 }
 
-func (vt *VicTasker) Checkpoint(ctx context.Context, opts plugin.CheckpointOpts) error {
+func (vt *VicTasker) Checkpoint(ctx context.Context, cp string, meta map[string]string) error {
 	return fmt.Errorf("Check points are not supported yet")
 }
 
