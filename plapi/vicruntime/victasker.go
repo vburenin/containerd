@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	eventsapi "github.com/containerd/containerd/api/services/events/v1"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/containers"
@@ -18,21 +19,22 @@ import (
 	vwevents "github.com/containerd/containerd/plapi/events"
 	"github.com/containerd/containerd/plapi/models"
 	"github.com/containerd/containerd/plapi/mounts"
-	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/runtime"
+	"github.com/gogo/protobuf/types"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 )
 
 type State struct {
 	pid    uint32
-	status plugin.Status
+	status runtime.Status
 }
 
 func (s State) Pid() uint32 {
 	return s.pid
 }
 
-func (s State) Status() plugin.Status {
+func (s State) Status() runtime.Status {
 	return s.status
 }
 
@@ -75,7 +77,7 @@ type VicTasker struct {
 	mu      sync.Mutex
 	main    *VicTask
 	other   map[int32]*VicTask
-	events  chan *plugin.Event
+	events  chan *eventsapi.RuntimeEvent
 	pl      *client.PortLayer
 	spec    *specs.Spec
 	binSpec []byte
@@ -87,8 +89,10 @@ type VicTasker struct {
 	imageID string
 }
 
-func NewVicTasker(ctx context.Context, pl *client.PortLayer, events chan *plugin.Event,
+func NewVicTasker(ctx context.Context, pl *client.PortLayer,
+	events chan *eventsapi.RuntimeEvent,
 	storage, root, id string) *VicTasker {
+
 	return &VicTasker{
 		main:    nil,
 		other:   make(map[int32]*VicTask),
@@ -100,7 +104,7 @@ func NewVicTasker(ctx context.Context, pl *client.PortLayer, events chan *plugin
 	}
 }
 
-func (vt *VicTasker) Create(ctx context.Context, opts plugin.CreateOpts) error {
+func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error {
 	vt.binSpec = opts.Spec
 	spec, err := loadSpec(opts.Spec)
 
@@ -221,10 +225,9 @@ func (vt *VicTasker) Create(ctx context.Context, opts plugin.CreateOpts) error {
 	CommitHandle(ctx, vt.pl, handle)
 
 	vt.eventProcessor()
-	vt.events <- &plugin.Event{
+	vt.events <- &eventsapi.RuntimeEvent{
 		ID:        vt.id,
-		Runtime:   runtimeName,
-		Type:      plugin.CreateEvent,
+		Type:      eventsapi.RuntimeEvent_CREATE,
 		Timestamp: time.Now(),
 		Pid:       1,
 	}
@@ -242,9 +245,9 @@ func (e *VicTasker) adoptEvent(ctx context.Context, be *BaseEvent) {
 	log.G(ctx).Debugf("Received container event: %s for %s(%s)", be.Event, be.Ref, e.id)
 	switch be.Event {
 	case vwevents.ContainerPoweredOff:
-		e.events <- &plugin.Event{
-			Type:       plugin.ExitEvent,
+		e.events <- &eventsapi.RuntimeEvent{
 			ID:         e.id,
+			Type:       eventsapi.RuntimeEvent_EXIT,
 			Pid:        1,
 			Timestamp:  be.CreatedTime,
 			ExitStatus: 0,
@@ -295,12 +298,13 @@ func (vt *VicTasker) Restore(ctx context.Context, ci *models.ContainerInfo) erro
 	return nil
 }
 
-func (vt *VicTasker) Info() plugin.TaskInfo {
-	return plugin.TaskInfo{
+func (vt *VicTasker) Info() runtime.TaskInfo {
+	return runtime.TaskInfo{
 		ID:          vt.id,
 		ContainerID: vt.id,
 		Runtime:     runtimeName,
 		Spec:        vt.binSpec,
+		Namespace:   "default",
 	}
 }
 
@@ -339,18 +343,16 @@ func (vt *VicTasker) Start(ctx context.Context) error {
 	if err != nil {
 		log.G(ctx).Errorf("Failed to start container IO")
 	}
-
-	vt.events <- &plugin.Event{
+	vt.events <- &eventsapi.RuntimeEvent{
 		Pid:       1,
 		ID:        vt.id,
 		Timestamp: time.Now(),
-		Type:      plugin.StartEvent,
-		Runtime:   runtimeName,
+		Type:      eventsapi.RuntimeEvent_START,
 	}
 	return nil
 }
 
-func (vt *VicTasker) State(ctx context.Context) (plugin.State, error) {
+func (vt *VicTasker) State(ctx context.Context) (runtime.State, error) {
 	l := log.G(ctx)
 	l.Debugf("State requested for container: %s", vt.id)
 	vt.mu.Lock()
@@ -358,29 +360,29 @@ func (vt *VicTasker) State(ctx context.Context) (plugin.State, error) {
 
 	h, err := GetHandle(ctx, vt.pl, vt.vid)
 	if err != nil {
-		return plugin.State{}, err
+		return runtime.State{}, err
 	}
 
 	r, err := vt.pl.Containers.GetState(containers.NewGetStateParamsWithContext(ctx).WithHandle(h))
 	if err != nil {
-		return plugin.State{}, err
+		return runtime.State{}, err
 	}
 
-	status := plugin.Status(0)
+	status := runtime.Status(0)
 	switch r.Payload.State {
 	case "RUNNING":
-		status = plugin.RunningStatus
+		status = runtime.RunningStatus
 	case "STOPPED":
-		status = plugin.StoppedStatus
+		status = runtime.StoppedStatus
 	case "CREATED":
-		status = plugin.CreatedStatus
+		status = runtime.CreatedStatus
 	default:
-		status = plugin.Status(0)
+		status = runtime.Status(0)
 	}
 
 	l.Debugf("Container %s state: %s", vt.id, r.Payload.State)
 
-	return plugin.State{
+	return runtime.State{
 		Status:   status,
 		Pid:      1,
 		Stdin:    vt.main.stdinPath,
@@ -405,15 +407,15 @@ func (vt *VicTasker) Kill(ctx context.Context, signal, pid uint32, b bool) error
 	return nil
 }
 
-func (vt *VicTasker) Exec(ctx context.Context, opts plugin.ExecOpts) (plugin.Process, error) {
+func (vt *VicTasker) Exec(ctx context.Context, opts runtime.ExecOpts) (runtime.Process, error) {
 	return nil, fmt.Errorf("Exec is not implemented")
 }
 
-func (vt *VicTasker) Processes(ctx context.Context) ([]uint32, error) {
+func (vt *VicTasker) Pids(ctx context.Context) ([]uint32, error) {
 	return []uint32{1}, nil
 }
 
-func (vt *VicTasker) ResizePty(ctx context.Context, pid uint32, size plugin.ConsoleSize) error {
+func (vt *VicTasker) ResizePty(ctx context.Context, pid uint32, size runtime.ConsoleSize) error {
 	log.G(ctx).Debugf("PTY requested for %d, size %dx%d: %s", pid, size.Width, size.Height, vt.id)
 	if pid == 1 {
 		return vt.main.ResizePTY(ctx, size)
@@ -429,14 +431,18 @@ func (vt *VicTasker) CloseIO(ctx context.Context, pid uint32) error {
 	return nil
 }
 
-func (vt *VicTasker) Checkpoint(ctx context.Context, cp string, meta map[string]string) error {
+func (vt *VicTasker) Checkpoint(ctx context.Context, cp string, any *types.Any) error {
 	return fmt.Errorf("Check points are not supported yet")
 }
 
-func (vt *VicTasker) DeleteProcess(ctx context.Context, pid uint32) (*plugin.Exit, error) {
+func (vt *VicTasker) DeleteProcess(ctx context.Context, pid uint32) (*runtime.Exit, error) {
 	log.G(ctx).Debugf("Deliting process %d: %s", pid, vt.id)
-	return &plugin.Exit{
+	return &runtime.Exit{
 		Status:    0,
 		Timestamp: time.Now(),
 	}, nil
+}
+
+func (vt *VicTasker) Update(ctx context.Context, any *types.Any) error {
+	return fmt.Errorf("Update is not supported yet")
 }

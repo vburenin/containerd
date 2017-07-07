@@ -11,7 +11,7 @@ import (
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/interaction"
 	"github.com/containerd/containerd/plapi/models"
-	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/runtime"
 	"github.com/containerd/fifo"
 	"github.com/pkg/errors"
 )
@@ -42,7 +42,7 @@ type VicTask struct {
 
 func NewVicProc(pl *client.PortLayer,
 	id, vid string,
-	path string, opts plugin.CreateOpts) *VicTask {
+	path string, opts runtime.CreateOpts) *VicTask {
 
 	return &VicTask{
 		pl:         pl,
@@ -149,7 +149,7 @@ func (p *VicTask) RunIO() error {
 	return nil
 }
 
-func (p *VicTask) ResizePTY(ctx context.Context, size plugin.ConsoleSize) error {
+func (p *VicTask) ResizePTY(ctx context.Context, size runtime.ConsoleSize) error {
 	params := interaction.NewContainerResizeParamsWithContext(ctx).
 		WithID(p.vid).
 		WithWidth(int32(size.Width)).
