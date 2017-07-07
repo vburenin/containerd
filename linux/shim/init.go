@@ -22,9 +22,9 @@ import (
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/runtime"
+	"github.com/containerd/containerd/typeurl"
 	"github.com/containerd/fifo"
 	runc "github.com/containerd/go-runc"
-	"github.com/gogo/protobuf/proto"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 )
@@ -48,19 +48,17 @@ type initProcess struct {
 	pid     int
 	closers []io.Closer
 	stdin   io.Closer
-
-	stdinPath  string
-	stdoutPath string
-	stderrPath string
-	terminal   bool
+	stdio   stdio
 }
 
 func newInitProcess(context context.Context, path, namespace string, r *shimapi.CreateTaskRequest) (*initProcess, error) {
 	var options runcopts.CreateOptions
 	if r.Options != nil {
-		if err := proto.Unmarshal(r.Options.Value, &options); err != nil {
+		v, err := typeurl.UnmarshalAny(r.Options)
+		if err != nil {
 			return nil, err
 		}
+		options = *v.(*runcopts.CreateOptions)
 	}
 	for _, rm := range r.Rootfs {
 		m := &mount.Mount{
@@ -80,13 +78,15 @@ func newInitProcess(context context.Context, path, namespace string, r *shimapi.
 		Root:         filepath.Join(RuncRoot, namespace),
 	}
 	p := &initProcess{
-		id:         r.ID,
-		bundle:     r.Bundle,
-		runtime:    runtime,
-		stdinPath:  r.Stdin,
-		stdoutPath: r.Stdout,
-		stderrPath: r.Stderr,
-		terminal:   r.Terminal,
+		id:      r.ID,
+		bundle:  r.Bundle,
+		runtime: runtime,
+		stdio: stdio{
+			stdin:    r.Stdin,
+			stdout:   r.Stdout,
+			stderr:   r.Stderr,
+			terminal: r.Terminal,
+		},
 	}
 	var (
 		err    error
@@ -167,6 +167,10 @@ func newInitProcess(context context.Context, path, namespace string, r *shimapi.
 	}
 	p.pid = pid
 	return p, nil
+}
+
+func (p *initProcess) ID() string {
+	return p.id
 }
 
 func (p *initProcess) Pid() int {
@@ -255,10 +259,6 @@ func (p *initProcess) killAll(context context.Context) error {
 	return p.runtimeError(err, "OCI runtime killall failed")
 }
 
-func (p *initProcess) Signal(sig int) error {
-	return checkKillError(unix.Kill(p.pid, syscall.Signal(sig)))
-}
-
 func (p *initProcess) Stdin() io.Closer {
 	return p.stdin
 }
@@ -266,9 +266,11 @@ func (p *initProcess) Stdin() io.Closer {
 func (p *initProcess) Checkpoint(context context.Context, r *shimapi.CheckpointTaskRequest) error {
 	var options runcopts.CheckpointOptions
 	if r.Options != nil {
-		if err := proto.Unmarshal(r.Options.Value, &options); err != nil {
+		v, err := typeurl.UnmarshalAny(r.Options)
+		if err != nil {
 			return err
 		}
+		options = *v.(*runcopts.CheckpointOptions)
 	}
 	var actions []runc.CheckpointAction
 	if !options.Exit {
@@ -300,6 +302,10 @@ func (p *initProcess) Update(context context.Context, r *shimapi.UpdateTaskReque
 		return err
 	}
 	return p.runtime.Update(context, p.id, &resources)
+}
+
+func (p *initProcess) Stdio() stdio {
+	return p.stdio
 }
 
 // TODO(mlaventure): move to runc package?

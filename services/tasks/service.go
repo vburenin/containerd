@@ -24,9 +24,7 @@ import (
 	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/runtime"
-	protobuf "github.com/gogo/protobuf/types"
 	google_protobuf "github.com/golang/protobuf/ptypes/empty"
-	specs "github.com/opencontainers/image-spec/specs-go"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -37,9 +35,6 @@ var (
 	_     = (api.TasksServer)(&Service{})
 	empty = &google_protobuf.Empty{}
 )
-
-// TODO(stevvooe): Clean up error mapping to avoid double mapping certain
-// errors within helper methods.
 
 func init() {
 	plugin.Register(&plugin.Registration{
@@ -214,11 +209,12 @@ func (s *Service) DeleteProcess(ctx context.Context, r *api.DeleteProcessRequest
 	if err != nil {
 		return nil, err
 	}
-	exit, err := t.DeleteProcess(ctx, r.Pid)
+	exit, err := t.DeleteProcess(ctx, r.ExecID)
 	if err != nil {
 		return nil, err
 	}
 	return &api.DeleteResponse{
+		ID:         r.ExecID,
 		ExitStatus: exit.Status,
 		ExitedAt:   exit.Timestamp,
 		Pid:        exit.Pid,
@@ -230,7 +226,6 @@ func taskFromContainerd(ctx context.Context, c runtime.Task) (*task.Task, error)
 	if err != nil {
 		return nil, err
 	}
-
 	var status task.Status
 	switch state.Status {
 	case runtime.CreatedStatus:
@@ -245,14 +240,9 @@ func taskFromContainerd(ctx context.Context, c runtime.Task) (*task.Task, error)
 		log.G(ctx).WithField("status", state.Status).Warn("unknown status")
 	}
 	return &task.Task{
-		ID:          c.Info().ID,
-		ContainerID: c.Info().ContainerID,
-		Pid:         state.Pid,
-		Status:      status,
-		Spec: &protobuf.Any{
-			TypeUrl: specs.Version,
-			Value:   c.Info().Spec,
-		},
+		ID:       c.Info().ID,
+		Pid:      state.Pid,
+		Status:   status,
 		Stdin:    state.Stdin,
 		Stdout:   state.Stdout,
 		Stderr:   state.Stderr,
@@ -321,18 +311,14 @@ func (s *Service) Kill(ctx context.Context, r *api.KillRequest) (*google_protobu
 	if err != nil {
 		return nil, err
 	}
-
-	switch v := r.PidOrAll.(type) {
-	case *api.KillRequest_All:
-		if err := t.Kill(ctx, r.Signal, 0, true); err != nil {
+	p := runtime.Process(t)
+	if r.ExecID != "" {
+		if p, err = t.Process(ctx, r.ExecID); err != nil {
 			return nil, err
 		}
-	case *api.KillRequest_Pid:
-		if err := t.Kill(ctx, r.Signal, v.Pid, false); err != nil {
-			return nil, err
-		}
-	default:
-		return nil, fmt.Errorf("invalid option specified; expected pid or all")
+	}
+	if err := p.Kill(ctx, r.Signal, r.All); err != nil {
+		return nil, err
 	}
 	return empty, nil
 }
@@ -352,11 +338,14 @@ func (s *Service) ListPids(ctx context.Context, r *api.ListPidsRequest) (*api.Li
 }
 
 func (s *Service) Exec(ctx context.Context, r *api.ExecProcessRequest) (*api.ExecProcessResponse, error) {
+	if r.ExecID == "" {
+		return nil, grpc.Errorf(codes.InvalidArgument, "exec id cannot be empty")
+	}
 	t, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
-	process, err := t.Exec(ctx, runtime.ExecOpts{
+	process, err := t.Exec(ctx, r.ExecID, runtime.ExecOpts{
 		Spec: r.Spec,
 		IO: runtime.IO{
 			Stdin:    r.Stdin,
@@ -382,7 +371,13 @@ func (s *Service) ResizePty(ctx context.Context, r *api.ResizePtyRequest) (*goog
 	if err != nil {
 		return nil, err
 	}
-	if err := t.ResizePty(ctx, r.Pid, runtime.ConsoleSize{
+	p := runtime.Process(t)
+	if r.ExecID != "" {
+		if p, err = t.Process(ctx, r.ExecID); err != nil {
+			return nil, err
+		}
+	}
+	if err := p.ResizePty(ctx, runtime.ConsoleSize{
 		Width:  r.Width,
 		Height: r.Height,
 	}); err != nil {
@@ -396,8 +391,14 @@ func (s *Service) CloseIO(ctx context.Context, r *api.CloseIORequest) (*google_p
 	if err != nil {
 		return nil, err
 	}
+	p := runtime.Process(t)
+	if r.ExecID != "" {
+		if p, err = t.Process(ctx, r.ExecID); err != nil {
+			return nil, err
+		}
+	}
 	if r.Stdin {
-		if err := t.CloseIO(ctx, r.Pid); err != nil {
+		if err := p.CloseIO(ctx); err != nil {
 			return nil, err
 		}
 	}
@@ -405,7 +406,11 @@ func (s *Service) CloseIO(ctx context.Context, r *api.CloseIORequest) (*google_p
 }
 
 func (s *Service) Checkpoint(ctx context.Context, r *api.CheckpointTaskRequest) (*api.CheckpointTaskResponse, error) {
-	t, err := s.getTask(ctx, r.ContainerID)
+	container, err := s.getContainer(ctx, r.ContainerID)
+	if err != nil {
+		return nil, err
+	}
+	t, err := s.getTaskFromContainer(ctx, container)
 	if err != nil {
 		return nil, err
 	}
@@ -428,7 +433,11 @@ func (s *Service) Checkpoint(ctx context.Context, r *api.CheckpointTaskRequest) 
 		return nil, err
 	}
 	// write the config to the content store
-	spec := bytes.NewReader(t.Info().Spec)
+	data, err := container.Spec.Marshal()
+	if err != nil {
+		return nil, err
+	}
+	spec := bytes.NewReader(data)
 	specD, err := s.writeContent(ctx, images.MediaTypeContainerd1CheckpointConfig, filepath.Join(image, "spec"), spec)
 	if err != nil {
 		return nil, err
@@ -472,19 +481,17 @@ func (s *Service) writeContent(ctx context.Context, mediaType, ref string, r io.
 	}, nil
 }
 
-func (s *Service) getContainer(ctx context.Context, id string) (containers.Container, error) {
+func (s *Service) getContainer(ctx context.Context, id string) (*containers.Container, error) {
 	var container containers.Container
-
 	if err := s.db.View(func(tx *bolt.Tx) error {
 		store := metadata.NewContainerStore(tx)
 		var err error
 		container, err = store.Get(ctx, id)
 		return err
 	}); err != nil {
-		return containers.Container{}, errdefs.ToGRPC(err)
+		return nil, errdefs.ToGRPC(err)
 	}
-
-	return container, nil
+	return &container, nil
 }
 
 func (s *Service) getTask(ctx context.Context, id string) (runtime.Task, error) {
@@ -492,17 +499,18 @@ func (s *Service) getTask(ctx context.Context, id string) (runtime.Task, error) 
 	if err != nil {
 		return nil, err
 	}
+	return s.getTaskFromContainer(ctx, container)
+}
 
+func (s *Service) getTaskFromContainer(ctx context.Context, container *containers.Container) (runtime.Task, error) {
 	runtime, err := s.getRuntime(container.Runtime.Name)
 	if err != nil {
-		return nil, errdefs.ToGRPCf(err, "runtime for task %v", id)
+		return nil, errdefs.ToGRPCf(err, "runtime for task %s", container.Runtime.Name)
 	}
-
-	t, err := runtime.Get(ctx, id)
+	t, err := runtime.Get(ctx, container.ID)
 	if err != nil {
-		return nil, grpc.Errorf(codes.NotFound, "task %v not found", id)
+		return nil, grpc.Errorf(codes.NotFound, "task %v not found", container.ID)
 	}
-
 	return t, nil
 }
 

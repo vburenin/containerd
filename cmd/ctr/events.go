@@ -7,7 +7,7 @@ import (
 	"text/tabwriter"
 
 	eventsapi "github.com/containerd/containerd/api/services/events/v1"
-	"github.com/containerd/containerd/events"
+	"github.com/containerd/containerd/typeurl"
 	"github.com/urfave/cli"
 )
 
@@ -57,15 +57,13 @@ var eventsCommand = cli.Command{
 
 func getEventOutput(env *eventsapi.Envelope) (string, error) {
 	out := ""
-
-	var de events.DynamicEvent
-	if err := events.UnmarshalEvent(env.Event, &de); err != nil {
+	v, err := typeurl.UnmarshalAny(env.Event)
+	if err != nil {
 		return "", err
 	}
-
-	switch e := de.Event.(type) {
+	switch e := v.(type) {
 	case *eventsapi.ContainerCreate:
-		out = fmt.Sprintf("id=%s image=%s runtime=%s", e.ContainerID, e.Image, e.Runtime)
+		out = fmt.Sprintf("id=%s image=%s runtime=%s", e.ID, e.Image, e.Runtime)
 	case *eventsapi.TaskCreate:
 		out = "id=" + e.ContainerID
 	case *eventsapi.TaskStart:
@@ -73,9 +71,9 @@ func getEventOutput(env *eventsapi.Envelope) (string, error) {
 	case *eventsapi.TaskDelete:
 		out = fmt.Sprintf("id=%s pid=%d status=%d", e.ContainerID, e.Pid, e.ExitStatus)
 	case *eventsapi.ContainerUpdate:
-		out = "id=" + e.ContainerID
+		out = "id=" + e.ID
 	case *eventsapi.ContainerDelete:
-		out = "id=" + e.ContainerID
+		out = "id=" + e.ID
 	case *eventsapi.SnapshotPrepare:
 		out = fmt.Sprintf("key=%s parent=%s", e.Key, e.Parent)
 	case *eventsapi.SnapshotCommit:
@@ -97,14 +95,13 @@ func getEventOutput(env *eventsapi.Envelope) (string, error) {
 		for _, m := range e.RootFS {
 			mounts = append(mounts, fmt.Sprintf("type=%s:src=%s", m.Type, m.Source))
 		}
-		out = fmt.Sprintf("id=%s bundle=%s rootfs=%s checkpoint=%s", e.ID, e.Bundle, strings.Join(mounts, ","), e.Checkpoint)
+		out = fmt.Sprintf("id=%s bundle=%s rootfs=%s checkpoint=%s", e.ContainerID, e.Bundle, strings.Join(mounts, ","), e.Checkpoint)
 	case *eventsapi.RuntimeEvent:
-		out = fmt.Sprintf("id=%s type=%s pid=%d status=%d exited=%s", e.ID, e.Type, e.Pid, e.ExitStatus, e.ExitedAt)
+		out = fmt.Sprintf("id=%s container_id=%s type=%s pid=%d status=%d exited=%s", e.ID, e.ContainerID, e.Type, e.Pid, e.ExitStatus, e.ExitedAt)
 	case *eventsapi.RuntimeDelete:
-		out = fmt.Sprintf("id=%s runtime=%s status=%d exited=%s", e.ID, e.Runtime, e.ExitStatus, e.ExitedAt)
+		out = fmt.Sprintf("id=%s runtime=%s status=%d exited=%s", e.ContainerID, e.Runtime, e.ExitStatus, e.ExitedAt)
 	default:
 		out = env.Event.TypeUrl
 	}
-
 	return out, nil
 }

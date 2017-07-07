@@ -139,7 +139,7 @@ func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts
 	if err != nil {
 		return nil, err
 	}
-	bundle, err := newBundle(filepath.Join(r.root, namespace), namespace, id, opts.Spec)
+	bundle, err := newBundle(filepath.Join(r.root, namespace), namespace, id, opts.Spec.Value)
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +183,7 @@ func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts
 	if _, err = s.Create(ctx, sopts); err != nil {
 		return nil, errors.New(grpc.ErrorDesc(err))
 	}
-	t := newTask(id, namespace, opts.Spec, s)
+	t := newTask(id, namespace, s)
 	if err := r.tasks.add(ctx, t); err != nil {
 		return nil, err
 	}
@@ -201,9 +201,9 @@ func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts
 		})
 	}
 	if err := r.emit(ctx, "/runtime/create", &eventsapi.RuntimeCreate{
-		ID:     id,
-		Bundle: bundle.path,
-		RootFS: runtimeMounts,
+		ContainerID: id,
+		Bundle:      bundle.path,
+		RootFS:      runtimeMounts,
 		IO: &eventsapi.RuntimeIO{
 			Stdin:    opts.IO.Stdin,
 			Stdout:   opts.IO.Stdout,
@@ -239,14 +239,14 @@ func (r *Runtime) Delete(ctx context.Context, c runtime.Task) (*runtime.Exit, er
 	r.tasks.delete(ctx, lc)
 
 	var (
-		bundle = loadBundle(filepath.Join(r.root, namespace, lc.containerID), namespace)
+		bundle = loadBundle(filepath.Join(r.root, namespace, lc.id), namespace)
 		i      = c.Info()
 	)
 	if err := r.emit(ctx, "/runtime/delete", &eventsapi.RuntimeDelete{
-		ID:         i.ID,
-		Runtime:    i.Runtime,
-		ExitStatus: rsp.ExitStatus,
-		ExitedAt:   rsp.ExitedAt,
+		ContainerID: i.ID,
+		Runtime:     i.Runtime,
+		ExitStatus:  rsp.ExitStatus,
+		ExitedAt:    rsp.ExitedAt,
 	}); err != nil {
 		return nil, err
 	}
@@ -323,15 +323,10 @@ func (r *Runtime) loadTasks(ctx context.Context, ns string) ([]*Task, error) {
 			}
 			continue
 		}
-		spec, err := bundle.Spec()
-		if err != nil {
-			log.G(ctx).WithError(err).Error("load task spec")
-		}
 		o = append(o, &Task{
-			containerID: id,
-			shim:        s,
-			spec:        spec,
-			namespace:   ns,
+			id:        id,
+			shim:      s,
+			namespace: ns,
 		})
 	}
 	return o, nil
