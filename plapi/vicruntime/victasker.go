@@ -242,7 +242,6 @@ func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error 
 
 func (vt *VicTasker) Restore(ctx context.Context, ci *models.ContainerInfo) error {
 	cfg := ci.ContainerConfig
-	fmt.Printf("%#v\n", cfg)
 	vt.storage = cfg.Annotations[AnnotationStorageName]
 	vt.imageID = cfg.Annotations[AnnotationImageID]
 	vt.vid = cfg.ContainerID
@@ -255,7 +254,6 @@ func (vt *VicTasker) Restore(ctx context.Context, ci *models.ContainerInfo) erro
 		id:         cfg.Annotations[AnnotationContainerdID],
 		vid:        cfg.ContainerID,
 	}
-	fmt.Printf("%#v\n", vt.main)
 
 	//vt.main.RunIO()
 
