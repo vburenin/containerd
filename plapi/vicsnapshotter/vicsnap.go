@@ -2,7 +2,6 @@ package vicsnapshotter
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"github.com/containerd/containerd/content"
@@ -12,6 +11,7 @@ import (
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/storage"
 	"github.com/containerd/containerd/plapi/models"
+	"github.com/containerd/containerd/plapi/mounts"
 	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plapi/vicruntime"
 	"github.com/containerd/containerd/plugin"
@@ -53,6 +53,7 @@ func NewVicSnap(ic *plugin.InitContext) (interface{}, error) {
 	if err := vs.loadAvailableImages(ic.Context); err != nil {
 		return nil, err
 	}
+	log.G(ic.Context).Debug("VIC snapshotter has been initialized")
 	return vs, nil
 }
 
@@ -89,12 +90,16 @@ func (vs *VicSnap) loadAvailableImages(ctx context.Context) error {
 		if _, ok := img.Metadata["committed"]; ok {
 			kind = snapshot.KindCommitted
 		}
-		vs.snapshots[img.ID] = snapshot.Info{
+		si := snapshot.Info{
 			Parent:   img.Metadata["parent"],
-			Name:     img.ID,
+			Name:     img.Metadata["orig_name"],
 			Readonly: false,
-			Kind:     snapshot.KindCommitted,
+			Kind:     kind,
 		}
+		if si.Name == "" {
+			si.Name = img.ID
+		}
+		vs.snapshots[img.ID] = si
 		if kind == snapshot.KindActive {
 			vs.addActive("img", img.ID, img.Parent)
 		}
@@ -129,17 +134,18 @@ func (vs *VicSnap) Usage(ctx context.Context, key string) (snapshot.Usage, error
 func (vs *VicSnap) Mounts(ctx context.Context, key string) ([]mount.Mount, error) {
 	vs.mu.Lock()
 	vs.mu.Unlock()
-	si, ok := vs.snapshots[key]
+	keyID := mounts.HashKey(key)
+	si, ok := vs.snapshots[keyID]
 	if !ok {
-		return nil, fmt.Errorf("Key %s not found", key)
+		return nil, errors.Wrapf(errdefs.ErrNotFound, "snapshot %v", key)
 	}
 	if si.Kind != snapshot.KindActive {
-		return nil, fmt.Errorf("Snapshot %s is not active", key)
+		return nil, errors.Wrapf(errdefs.ErrFailedPrecondition, "snapshot %v", key)
 	}
-	mounts, ok := vs.active[key]
+	mounts, ok := vs.active[keyID]
 	if !ok {
 		log.G(ctx).WithField("key", key).Errorf("No mounts found for the active snapshot")
-		return nil, fmt.Errorf("No mounts found for the active snapshot %s", key)
+		return nil, errors.Wrapf(errdefs.ErrNotFound, "active snapshot %v", key)
 	}
 	return mounts, nil
 }
@@ -148,18 +154,21 @@ func (vs *VicSnap) addActive(snapType, key, parent string) []mount.Mount {
 	m := mount.Mount{
 		Options: []string{"rw"},
 		Type:    "ext4",
-		Source:  fmt.Sprintf("%s/%s/%s", snapType, parent, key),
+		Source:  mounts.FormatMountSource(snapType, key, parent),
 	}
 
-	vs.snapshots[key] = snapshot.Info{
+	keyID := mounts.HashKey(key)
+	parentID := mounts.HashParent(parent)
+
+	vs.snapshots[keyID] = snapshot.Info{
 		Name:     key,
-		Parent:   parent,
+		Parent:   parentID,
 		Kind:     snapshot.KindActive,
 		Readonly: snapType == "view",
 	}
 
 	mountList := []mount.Mount{m}
-	vs.active[key] = mountList
+	vs.active[keyID] = mountList
 	return mountList
 }
 
@@ -168,20 +177,20 @@ func (vs *VicSnap) prepareSnapshot(ctx context.Context, snapType, key, parent st
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
-	if _, ok := vs.snapshots[key]; ok {
+	keyID := mounts.HashKey(key)
+	parentID := mounts.HashParent(parent)
+	if _, ok := vs.snapshots[keyID]; ok {
 		return nil, errors.Wrapf(errdefs.ErrAlreadyExists, "snapshot %v", key)
 	}
 
-	if parent != "" {
-		if p, ok := vs.snapshots[parent]; !ok {
+	if parentID != "scratch" {
+		if p, ok := vs.snapshots[parentID]; !ok {
 			return nil, errors.Wrapf(errdefs.ErrNotFound, "snapshot %v", key)
 		} else {
 			if p.Kind == snapshot.KindActive {
 				return nil, errors.Wrapf(errdefs.ErrInvalidArgument, "snapshot %v", key)
 			}
 		}
-	} else {
-		parent = "scratch"
 	}
 
 	return vs.addActive(snapType, key, parent), nil
@@ -198,7 +207,10 @@ func (vs *VicSnap) View(ctx context.Context, key, parent string) ([]mount.Mount,
 func (vs *VicSnap) Commit(ctx context.Context, name, key string) error {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
-	s, ok := vs.snapshots[key]
+	keyID := mounts.HashKey(key)
+	nameID := mounts.HashKey(name)
+
+	s, ok := vs.snapshots[keyID]
 	if !ok {
 		return errors.Wrapf(errdefs.ErrNotFound, "snapshot %v", key)
 	}
@@ -206,18 +218,19 @@ func (vs *VicSnap) Commit(ctx context.Context, name, key string) error {
 		return errors.Wrapf(errdefs.ErrFailedPrecondition, "requested snapshot %v not active", key)
 	}
 
-	if _, ok := vs.snapshots[name]; ok {
+	if _, ok := vs.snapshots[nameID]; ok {
 		return errors.Wrapf(errdefs.ErrAlreadyExists, "snapshot %v", key)
 	}
 
 	params := storage.NewCommitImageParamsWithContext(ctx).
 		WithStoreName(vs.storageName).
-		WithNewID(name).
-		WithOldID(key)
+		WithNewID(nameID).
+		WithOldID(keyID).
+		WithOrigName(name)
 
 	_, err := vs.plClient.Storage.CommitImage(params)
 	if err == nil {
-		vs.snapshots[name] = snapshot.Info{
+		vs.snapshots[nameID] = snapshot.Info{
 			Name:     name,
 			Parent:   s.Parent,
 			Kind:     snapshot.KindCommitted,
@@ -231,18 +244,20 @@ func (vs *VicSnap) Remove(ctx context.Context, key string) error {
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
-	_, ok := vs.snapshots[key]
+	keyID := mounts.HashKey(key)
+
+	_, ok := vs.snapshots[keyID]
 
 	if !ok {
 		return errors.Wrapf(errdefs.ErrNotFound, "snapshot %v", key)
 	}
-	params := storage.NewRemoveImageParamsWithContext(ctx).WithStoreName(vs.storageName).WithImageID(key)
+	params := storage.NewRemoveImageParamsWithContext(ctx).WithStoreName(vs.storageName).WithImageID(keyID)
 
 	if _, err := vs.plClient.Storage.RemoveImage(params); err != nil {
 		return err
 	}
 
-	delete(vs.snapshots, key)
+	delete(vs.snapshots, keyID)
 	return nil
 }
 

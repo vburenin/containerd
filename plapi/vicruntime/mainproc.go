@@ -160,7 +160,7 @@ func (p *VicTask) ResizePTY(ctx context.Context, size runtime.ConsoleSize) error
 	}
 	return err
 }
-func (p *VicTask) CloseSTDIN(ctx context.Context) error {
+func (p *VicTask) CloseIO(ctx context.Context) error {
 	for _, c := range p.closers {
 		c.Close()
 	}

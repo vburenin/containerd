@@ -14,6 +14,7 @@ import (
 	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plapi/vicruntime"
 	"github.com/containerd/containerd/plugin"
+	"github.com/containerd/containerd/snapshot"
 	"github.com/go-openapi/swag"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -29,6 +30,7 @@ func init() {
 		Config: vicconfig.DefaultConfig(),
 		Requires: []plugin.PluginType{
 			plugin.ContentPlugin,
+			plugin.SnapshotPlugin,
 		},
 	})
 }
@@ -37,6 +39,7 @@ type VicDiffer struct {
 	store       content.Store
 	storageName string
 	plClient    *client.PortLayer
+	shotter     snapshot.Snapshotter
 }
 
 var emptyDesc = ocispec.Descriptor{}
@@ -47,6 +50,7 @@ func NewVicDiffer(ic *plugin.InitContext) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
+	s, err := ic.Get(plugin.SnapshotPlugin)
 	if err != nil {
 		return nil, err
 	}
@@ -54,6 +58,7 @@ func NewVicDiffer(ic *plugin.InitContext) (interface{}, error) {
 		store:       c.(content.Store),
 		plClient:    vicruntime.PortLayerClient(cfg.PortlayerAddress),
 		storageName: "containerd-storage",
+		shotter:     s.(snapshot.Snapshotter),
 	}, nil
 }
 
@@ -108,12 +113,16 @@ func (vd *VicDiffer) DiffMounts(ctx context.Context, lower, upper []mount.Mount,
 }
 
 func (vd *VicDiffer) writeImage(ctx context.Context, data io.Reader, sum string, m *mounts.VicMount) (string, error) {
+	stat, err := vd.shotter.Stat(ctx, m.Current)
+	if err != nil {
+		return "", err
+	}
 	params := storage.NewUnpackImageParamsWithContext(ctx).
 		WithImageID(m.Current).
 		WithStoreName(vd.storageName).
 		WithParentID(m.Parent).
-		WithMetadatakey(swag.String("metaData")).
-		WithMetadataval(swag.String("")).
+		WithMetadatakey(swag.String("orig_name")).
+		WithMetadataval(&stat.Name).
 		WithImageFile(ioutil.NopCloser(data))
 
 	r, err := vd.plClient.Storage.UnpackImage(params)

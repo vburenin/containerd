@@ -611,6 +611,12 @@
 						"type": "string",
 						"in": "query",
 						"required": true
+					},
+					{
+						"name": "orig_name",
+						"type": "string",
+						"in": "query",
+						"required": true
 					}
 				],
 				"responses": {

@@ -64,6 +64,8 @@ type CommitImageParams struct {
 	NewID string
 	/*OldID*/
 	OldID string
+	/*OrigName*/
+	OrigName string
 	/*StoreName*/
 	StoreName string
 
@@ -127,6 +129,17 @@ func (o *CommitImageParams) SetOldID(oldID string) {
 	o.OldID = oldID
 }
 
+// WithOrigName adds the origName to the commit image params
+func (o *CommitImageParams) WithOrigName(origName string) *CommitImageParams {
+	o.SetOrigName(origName)
+	return o
+}
+
+// SetOrigName adds the origName to the commit image params
+func (o *CommitImageParams) SetOrigName(origName string) {
+	o.OrigName = origName
+}
+
 // WithStoreName adds the storeName to the commit image params
 func (o *CommitImageParams) WithStoreName(storeName string) *CommitImageParams {
 	o.SetStoreName(storeName)
@@ -160,6 +173,15 @@ func (o *CommitImageParams) WriteToRequest(r runtime.ClientRequest, reg strfmt.R
 	qOldID := qrOldID
 	if qOldID != "" {
 		if err := r.SetQueryParam("old_id", qOldID); err != nil {
+			return err
+		}
+	}
+
+	// query param orig_name
+	qrOrigName := o.OrigName
+	qOrigName := qrOrigName
+	if qOrigName != "" {
+		if err := r.SetQueryParam("orig_name", qOrigName); err != nil {
 			return err
 		}
 	}

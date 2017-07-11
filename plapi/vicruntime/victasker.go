@@ -8,15 +8,14 @@ import (
 	"time"
 
 	eventsapi "github.com/containerd/containerd/api/services/events/v1"
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/containers"
-	"github.com/containerd/containerd/plapi/client/events"
 	"github.com/containerd/containerd/plapi/client/interaction"
 	"github.com/containerd/containerd/plapi/client/logging"
 	"github.com/containerd/containerd/plapi/client/scopes"
 	"github.com/containerd/containerd/plapi/client/tasks"
-	vwevents "github.com/containerd/containerd/plapi/events"
 	"github.com/containerd/containerd/plapi/models"
 	"github.com/containerd/containerd/plapi/mounts"
 	"github.com/containerd/containerd/runtime"
@@ -76,7 +75,7 @@ func (e *Eventer) Write(d []byte) (int, error) {
 type VicTasker struct {
 	mu      sync.Mutex
 	main    *VicTask
-	other   map[int32]*VicTask
+	other   map[string]*VicTask
 	events  chan *eventsapi.RuntimeEvent
 	pl      *client.PortLayer
 	spec    *specs.Spec
@@ -95,7 +94,7 @@ func NewVicTasker(ctx context.Context, pl *client.PortLayer,
 
 	return &VicTasker{
 		main:    nil,
-		other:   make(map[int32]*VicTask),
+		other:   make(map[string]*VicTask),
 		events:  events,
 		id:      id,
 		storage: storage,
@@ -104,9 +103,13 @@ func NewVicTasker(ctx context.Context, pl *client.PortLayer,
 	}
 }
 
+func (vt *VicTasker) ID() string {
+	return vt.id
+}
+
 func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error {
-	vt.binSpec = opts.Spec
-	spec, err := loadSpec(opts.Spec)
+	vt.binSpec = opts.Spec.Value
+	spec, err := loadSpec(vt.binSpec)
 
 	if err != nil {
 		return errors.Wrap(err, "Could not decode spec")
@@ -146,7 +149,7 @@ func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error 
 			AnnotationImageID:       vt.imageID,
 			AnnotationStorageName:   vt.storage,
 			AnnotationContainerdID:  vt.id,
-			AnnotationContainerSpec: string(opts.Spec),
+			AnnotationContainerSpec: string(opts.Spec.Value),
 		},
 
 		// Layer
@@ -224,7 +227,6 @@ func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error 
 
 	CommitHandle(ctx, vt.pl, handle)
 
-	vt.eventProcessor()
 	vt.events <- &eventsapi.RuntimeEvent{
 		ID:        vt.id,
 		Type:      eventsapi.RuntimeEvent_CREATE,
@@ -238,73 +240,34 @@ func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error 
 	return nil
 }
 
-func (e *VicTasker) adoptEvent(ctx context.Context, be *BaseEvent) {
-	if be.Type != "events.ContainerEvent" {
-		return
-	}
-	log.G(ctx).Debugf("Received container event: %s for %s(%s)", be.Event, be.Ref, e.id)
-	switch be.Event {
-	case vwevents.ContainerPoweredOff:
-		e.events <- &eventsapi.RuntimeEvent{
-			ID:         e.id,
-			Type:       eventsapi.RuntimeEvent_EXIT,
-			Pid:        1,
-			Timestamp:  be.CreatedTime,
-			ExitStatus: 0,
-		}
-		e.main.CloseSTDIN(ctx)
-	default:
-		log.G(ctx).Warningf("Unknown event received: %s", be.Event)
-	}
-}
-
-func (vt *VicTasker) eventProcessor() {
-	ctx := context.Background()
-	eventer := &Eventer{
-		eventWriter: func(d []byte) (int, error) {
-			log.G(ctx).Debugf("Event: %s", string(d))
-			plEvent := &BaseEvent{}
-			err := json.Unmarshal(d, &plEvent)
-			if err != nil {
-				log.G(ctx).Errorf("Received event is not decoded: %s, error: %s", string(d), err)
-			}
-			vt.adoptEvent(ctx, plEvent)
-			return len(d), nil
-		},
-	}
-	go vt.pl.Events.GetEvents(events.NewGetEventsParamsWithContext(ctx), eventer)
-}
-
 func (vt *VicTasker) Restore(ctx context.Context, ci *models.ContainerInfo) error {
 	cfg := ci.ContainerConfig
+	fmt.Printf("%#v\n", cfg)
 	vt.storage = cfg.Annotations[AnnotationStorageName]
 	vt.imageID = cfg.Annotations[AnnotationImageID]
-
 	vt.vid = cfg.ContainerID
-	vt.id = cfg.Annotations[AnnotationContainerdID]
 
-	//c := &VicTasker{
-	//	comm: &plugin.IO{
-	//		Stdout:   cfg.Annotations[AnnotationStdOutKey],
-	//		Stdin:    cfg.Annotations[AnnotationStdOutKey],
-	//		Stderr:   cfg.Annotations[AnnotationStdErrKey],
-	//		Terminal: cfg.Tty != nil && *cfg.Tty,
-	//	},
-	//}
-	//
-	//if c.id == "" {
-	//	c.id = c.vid
-	//}
+	vt.main = &VicTask{
+		terminal:   cfg.Tty != nil && *cfg.Tty,
+		stdinPath:  cfg.Annotations[AnnotationStdInKey],
+		stdoutPath: cfg.Annotations[AnnotationStdOutKey],
+		stderrPath: cfg.Annotations[AnnotationStdErrKey],
+		id:         cfg.Annotations[AnnotationContainerdID],
+		vid:        cfg.ContainerID,
+	}
+	fmt.Printf("%#v\n", vt.main)
+
+	//vt.main.RunIO()
+
 	return nil
 }
 
 func (vt *VicTasker) Info() runtime.TaskInfo {
 	return runtime.TaskInfo{
-		ID:          vt.id,
-		ContainerID: vt.id,
-		Runtime:     runtimeName,
-		Spec:        vt.binSpec,
-		Namespace:   "default",
+		ID:        vt.id,
+		Runtime:   pluginID,
+		Spec:      vt.binSpec,
+		Namespace: "default",
 	}
 }
 
@@ -354,7 +317,8 @@ func (vt *VicTasker) Start(ctx context.Context) error {
 
 func (vt *VicTasker) State(ctx context.Context) (runtime.State, error) {
 	l := log.G(ctx)
-	l.Debugf("State requested for container: %s", vt.id)
+	l.Debugf("State requested for container: %s, ref: %s", vt.id, vt.vid)
+
 	vt.mu.Lock()
 	defer vt.mu.Unlock()
 
@@ -402,12 +366,12 @@ func (vt *VicTasker) Resume(ctx context.Context) error {
 	return nil
 }
 
-func (vt *VicTasker) Kill(ctx context.Context, signal, pid uint32, b bool) error {
-	log.G(ctx).Debugf("Sending signal %d to %d: %s", signal, pid, vt.id)
+func (vt *VicTasker) Kill(ctx context.Context, signal uint32, b bool) error {
+	log.G(ctx).Debugf("Sending signal %d to %s", signal, vt.id)
 	return nil
 }
 
-func (vt *VicTasker) Exec(ctx context.Context, opts runtime.ExecOpts) (runtime.Process, error) {
+func (vt *VicTasker) Exec(ctx context.Context, s string, opts runtime.ExecOpts) (runtime.Process, error) {
 	return nil, fmt.Errorf("Exec is not implemented")
 }
 
@@ -415,28 +379,22 @@ func (vt *VicTasker) Pids(ctx context.Context) ([]uint32, error) {
 	return []uint32{1}, nil
 }
 
-func (vt *VicTasker) ResizePty(ctx context.Context, pid uint32, size runtime.ConsoleSize) error {
-	log.G(ctx).Debugf("PTY requested for %d, size %dx%d: %s", pid, size.Width, size.Height, vt.id)
-	if pid == 1 {
-		return vt.main.ResizePTY(ctx, size)
-	}
-	return nil
+func (vt *VicTasker) ResizePty(ctx context.Context, size runtime.ConsoleSize) error {
+	log.G(ctx).Debugf("PTY requested for %s, size %dx%d", vt.id, size.Width, size.Height)
+	return vt.main.ResizePTY(ctx, size)
 }
 
-func (vt *VicTasker) CloseIO(ctx context.Context, pid uint32) error {
-	log.G(ctx).Debugf("Closing IO for %d: %s", pid, vt.id)
-	if pid == 1 {
-		return vt.main.CloseSTDIN(ctx)
-	}
-	return nil
+func (vt *VicTasker) CloseIO(ctx context.Context) error {
+	log.G(ctx).Debugf("Closing IO for %s", vt.id)
+	return vt.main.CloseIO(ctx)
 }
 
 func (vt *VicTasker) Checkpoint(ctx context.Context, cp string, any *types.Any) error {
 	return fmt.Errorf("Check points are not supported yet")
 }
 
-func (vt *VicTasker) DeleteProcess(ctx context.Context, pid uint32) (*runtime.Exit, error) {
-	log.G(ctx).Debugf("Deliting process %d: %s", pid, vt.id)
+func (vt *VicTasker) DeleteProcess(ctx context.Context, pid string) (*runtime.Exit, error) {
+	log.G(ctx).Debugf("Deleting process %s: %s", pid, vt.id)
 	return &runtime.Exit{
 		Status:    0,
 		Timestamp: time.Now(),
@@ -445,4 +403,11 @@ func (vt *VicTasker) DeleteProcess(ctx context.Context, pid uint32) (*runtime.Ex
 
 func (vt *VicTasker) Update(ctx context.Context, any *types.Any) error {
 	return fmt.Errorf("Update is not supported yet")
+}
+
+func (vt *VicTasker) Process(ctx context.Context, pid string) (runtime.Process, error) {
+	if pid == vt.id {
+		return vt, nil
+	}
+	return nil, errors.Wrapf(errdefs.ErrNotFound, "Process not found: %s", pid)
 }
