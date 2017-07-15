@@ -13,13 +13,12 @@ func TestValidIdentifiers(t *testing.T) {
 		"Default",
 		t.Name(),
 		"default-default",
-		"default--default",
 		"containerd.io",
 		"foo.boo",
 		"swarmkit.docker.io",
-		"zn--e9.org", // or something like it!
 		"0912341234",
 		"task.0.0123456789",
+		"underscores_are_allowed",
 		strings.Repeat("a", maxLength),
 	} {
 		t.Run(input, func(t *testing.T) {
@@ -32,6 +31,7 @@ func TestValidIdentifiers(t *testing.T) {
 
 func TestInvalidIdentifiers(t *testing.T) {
 	for _, input := range []string{
+		"",
 		".foo..foo",
 		"foo/foo",
 		"foo/..",
@@ -39,7 +39,9 @@ func TestInvalidIdentifiers(t *testing.T) {
 		"foo.-boo",
 		"-foo.boo",
 		"foo.boo-",
-		"foo_foo.boo_underscores", // boo-urns?
+		"but__only_tasteful_underscores",
+		"zn--e9.org", // or something like it!
+		"default--default",
 		strings.Repeat("a", maxLength+1),
 	} {
 

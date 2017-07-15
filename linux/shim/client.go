@@ -1,4 +1,4 @@
-// +build linux
+// +build !windows
 
 package shim
 
@@ -10,7 +10,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -28,7 +27,7 @@ import (
 type ClientOpt func(context.Context, Config) (shim.ShimClient, io.Closer, error)
 
 // WithStart executes a new shim process
-func WithStart(binary string) ClientOpt {
+func WithStart(binary, address string, debug bool) ClientOpt {
 	return func(ctx context.Context, config Config) (shim.ShimClient, io.Closer, error) {
 		socket, err := newSocket(config)
 		if err != nil {
@@ -41,13 +40,14 @@ func WithStart(binary string) ClientOpt {
 		}
 		defer f.Close()
 
-		cmd := newCommand(binary, config, f)
+		cmd := newCommand(binary, address, debug, config, f)
 		if err := reaper.Default.Start(cmd); err != nil {
 			return nil, nil, errors.Wrapf(err, "failed to start shim")
 		}
 		log.G(ctx).WithFields(logrus.Fields{
 			"pid":     cmd.Process.Pid,
 			"address": config.Address,
+			"debug":   debug,
 		}).Infof("shim %s started", binary)
 		if err = sys.SetOOMScore(cmd.Process.Pid, sys.OOMScoreMaxKillable); err != nil {
 			return nil, nil, errors.Wrap(err, "failed to set OOM Score on shim")
@@ -56,11 +56,12 @@ func WithStart(binary string) ClientOpt {
 	}
 }
 
-func newCommand(binary string, config Config, socket *os.File) *exec.Cmd {
+func newCommand(binary, address string, debug bool, config Config, socket *os.File) *exec.Cmd {
 	args := []string{
 		"--namespace", config.Namespace,
+		"--address", address,
 	}
-	if config.Debug {
+	if debug {
 		args = append(args, "--debug")
 	}
 	cmd := exec.Command(binary, args...)
@@ -68,11 +69,12 @@ func newCommand(binary string, config Config, socket *os.File) *exec.Cmd {
 	// make sure the shim can be re-parented to system init
 	// and is cloned in a new mount namespace because the overlay/filesystems
 	// will be mounted by the shim
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWNS,
-		Setpgid:    true,
-	}
+	cmd.SysProcAttr = &atter
 	cmd.ExtraFiles = append(cmd.ExtraFiles, socket)
+	if debug {
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+	}
 	return cmd
 }
 
@@ -88,12 +90,12 @@ func newSocket(config Config) (*net.UnixListener, error) {
 	return l.(*net.UnixListener), nil
 }
 
-func connect(address string) (*grpc.ClientConn, error) {
+func connect(address string, d func(string, time.Duration) (net.Conn, error)) (*grpc.ClientConn, error) {
 	gopts := []grpc.DialOption{
 		grpc.WithBlock(),
 		grpc.WithInsecure(),
 		grpc.WithTimeout(100 * time.Second),
-		grpc.WithDialer(dialer),
+		grpc.WithDialer(d),
 		grpc.FailOnNonTempDialError(true),
 	}
 	conn, err := grpc.Dial(dialAddress(address), gopts...)
@@ -105,6 +107,11 @@ func connect(address string) (*grpc.ClientConn, error) {
 
 func dialer(address string, timeout time.Duration) (net.Conn, error) {
 	address = strings.TrimPrefix(address, "unix://")
+	return net.DialTimeout("unix", address, timeout)
+}
+
+func annonDialer(address string, timeout time.Duration) (net.Conn, error) {
+	address = strings.TrimPrefix(address, "unix://")
 	return net.DialTimeout("unix", "\x00"+address, timeout)
 }
 
@@ -114,7 +121,7 @@ func dialAddress(address string) string {
 
 // WithConnect connects to an existing shim
 func WithConnect(ctx context.Context, config Config) (shim.ShimClient, io.Closer, error) {
-	conn, err := connect(config.Address)
+	conn, err := connect(config.Address, annonDialer)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -123,7 +130,7 @@ func WithConnect(ctx context.Context, config Config) (shim.ShimClient, io.Closer
 
 // WithLocal uses an in process shim
 func WithLocal(ctx context.Context, config Config) (shim.ShimClient, io.Closer, error) {
-	service, err := NewService(config.Path, config.Namespace)
+	service, err := NewService(config.Path, config.Namespace, "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -134,7 +141,6 @@ type Config struct {
 	Address   string
 	Path      string
 	Namespace string
-	Debug     bool
 }
 
 // New returns a new shim client

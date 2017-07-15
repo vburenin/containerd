@@ -46,6 +46,10 @@ containerd CLI
 			Name:  "timeout",
 			Usage: "total timeout for ctr commands",
 		},
+		cli.DurationFlag{
+			Name:  "connect-timeout",
+			Usage: "timeout for connecting to containerd",
+		},
 		cli.StringFlag{
 			Name:   "namespace, n",
 			Usage:  "namespace to use with commands",
@@ -54,13 +58,19 @@ containerd CLI
 		},
 	}
 	app.Commands = append([]cli.Command{
-		attachCommand,
+		imageCommand,
+		pullCommand,
+		fetchCommand,
+		fetchObjectCommand,
+		pushCommand,
+		pushObjectCommand,
+		containersCommand,
 		checkpointCommand,
 		runCommand,
+		attachCommand,
 		deleteCommand,
 		namespacesCommand,
 		eventsCommand,
-		containersCommand,
 		taskListCommand,
 		infoCommand,
 		killCommand,
@@ -71,6 +81,8 @@ containerd CLI
 		snapshotCommand,
 		versionCommand,
 		psCommand,
+		applyCommand,
+		rootfsCommand,
 	}, extraCmds...)
 	app.Before = func(context *cli.Context) error {
 		if context.GlobalBool("debug") {

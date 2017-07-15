@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -13,8 +14,13 @@ import (
 	"github.com/containerd/console"
 	events "github.com/containerd/containerd/api/services/events/v1"
 	"github.com/containerd/containerd/api/types/task"
+	"github.com/containerd/containerd/errdefs"
+	evt "github.com/containerd/containerd/events"
 	shimapi "github.com/containerd/containerd/linux/shim/v1"
+	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/reaper"
+	"github.com/containerd/containerd/typeurl"
 	google_protobuf "github.com/golang/protobuf/ptypes/empty"
 	"github.com/pkg/errors"
 	"golang.org/x/net/context"
@@ -29,16 +35,32 @@ var empty = &google_protobuf.Empty{}
 const RuncRoot = "/run/containerd/runc"
 
 // NewService returns a new shim service that can be used via GRPC
-func NewService(path, namespace string) (*Service, error) {
+func NewService(path, namespace, address string) (*Service, error) {
 	if namespace == "" {
 		return nil, fmt.Errorf("shim namespace cannot be empty")
 	}
-	return &Service{
+	context := namespaces.WithNamespace(context.Background(), namespace)
+	var client poster
+	if address != "" {
+		conn, err := connect(address, dialer)
+		if err != nil {
+			return nil, errors.Wrapf(err, "failed to dial %q", address)
+		}
+		client = events.NewEventsClient(conn)
+	} else {
+		client = &localEventsClient{
+			emitter: evt.GetPoster(context),
+		}
+	}
+	s := &Service{
 		path:      path,
 		processes: make(map[string]process),
-		events:    make(chan *events.RuntimeEvent, 4096),
+		events:    make(chan interface{}, 4096),
 		namespace: namespace,
-	}, nil
+		context:   context,
+	}
+	go s.forward(client)
+	return s, nil
 }
 
 type Service struct {
@@ -48,19 +70,17 @@ type Service struct {
 	bundle        string
 	mu            sync.Mutex
 	processes     map[string]process
-	events        chan *events.RuntimeEvent
+	events        chan interface{}
 	eventsMu      sync.Mutex
-	deferredEvent *events.RuntimeEvent
+	deferredEvent interface{}
 	namespace     string
+	context       context.Context
 }
 
 func (s *Service) Create(ctx context.Context, r *shimapi.CreateTaskRequest) (*shimapi.CreateTaskResponse, error) {
-	if r.ID == "" {
-		return nil, grpc.Errorf(codes.InvalidArgument, "task id cannot be empty")
-	}
 	process, err := newInitProcess(ctx, s.path, s.namespace, r)
 	if err != nil {
-		return nil, err
+		return nil, errdefs.ToGRPC(err)
 	}
 	s.mu.Lock()
 	// save the main task id and bundle to the shim for additional requests
@@ -74,11 +94,18 @@ func (s *Service) Create(ctx context.Context, r *shimapi.CreateTaskRequest) (*sh
 		ExitCh: make(chan int, 1),
 	}
 	reaper.Default.Register(pid, cmd)
-	s.events <- &events.RuntimeEvent{
-		Type:        events.RuntimeEvent_CREATE,
-		ID:          r.ID,
-		ContainerID: s.id,
-		Pid:         uint32(pid),
+	s.events <- &events.TaskCreate{
+		ContainerID: r.ID,
+		Bundle:      r.Bundle,
+		Rootfs:      r.Rootfs,
+		IO: &events.TaskIO{
+			Stdin:    r.Stdin,
+			Stdout:   r.Stdout,
+			Stderr:   r.Stderr,
+			Terminal: r.Terminal,
+		},
+		Checkpoint: r.Checkpoint,
+		Pid:        uint32(pid),
 	}
 	go s.waitExit(process, pid, cmd)
 	return &shimapi.CreateTaskResponse{
@@ -93,9 +120,7 @@ func (s *Service) Start(ctx context.Context, r *google_protobuf.Empty) (*google_
 	if err := s.initProcess.Start(ctx); err != nil {
 		return nil, err
 	}
-	s.events <- &events.RuntimeEvent{
-		Type:        events.RuntimeEvent_START,
-		ID:          s.id,
+	s.events <- &events.TaskStart{
 		ContainerID: s.id,
 		Pid:         uint32(s.initProcess.Pid()),
 	}
@@ -112,6 +137,12 @@ func (s *Service) Delete(ctx context.Context, r *google_protobuf.Empty) (*shimap
 	s.mu.Lock()
 	delete(s.processes, p.ID())
 	s.mu.Unlock()
+	s.events <- &events.TaskDelete{
+		ContainerID: s.id,
+		ExitStatus:  uint32(p.Status()),
+		ExitedAt:    p.ExitedAt(),
+		Pid:         uint32(p.Pid()),
+	}
 	return &shimapi.DeleteResponse{
 		ExitStatus: uint32(p.Status()),
 		ExitedAt:   p.ExitedAt(),
@@ -162,10 +193,9 @@ func (s *Service) Exec(ctx context.Context, r *shimapi.ExecProcessRequest) (*shi
 	reaper.Default.Register(pid, cmd)
 	s.processes[r.ID] = process
 
-	s.events <- &events.RuntimeEvent{
-		Type:        events.RuntimeEvent_EXEC_ADDED,
-		ID:          r.ID,
+	s.events <- &events.TaskExecAdded{
 		ContainerID: s.id,
+		ExecID:      r.ID,
 		Pid:         uint32(pid),
 	}
 	go s.waitExit(process, pid, cmd)
@@ -192,30 +222,6 @@ func (s *Service) ResizePty(ctx context.Context, r *shimapi.ResizePtyRequest) (*
 		return nil, err
 	}
 	return empty, nil
-}
-
-func (s *Service) Stream(r *shimapi.StreamEventsRequest, stream shimapi.Shim_StreamServer) error {
-	s.eventsMu.Lock()
-	defer s.eventsMu.Unlock()
-
-	if s.deferredEvent != nil {
-		if err := stream.Send(s.deferredEvent); err != nil {
-			return err
-		}
-		s.deferredEvent = nil
-	}
-
-	for {
-		select {
-		case e := <-s.events:
-			if err := stream.Send(e); err != nil {
-				s.deferredEvent = e
-				return err
-			}
-		case <-stream.Context().Done():
-			return stream.Context().Err()
-		}
-	}
 }
 
 func (s *Service) State(ctx context.Context, r *shimapi.StateRequest) (*shimapi.StateResponse, error) {
@@ -261,6 +267,9 @@ func (s *Service) Pause(ctx context.Context, r *google_protobuf.Empty) (*google_
 	if err := s.initProcess.Pause(ctx); err != nil {
 		return nil, err
 	}
+	s.events <- &events.TaskPaused{
+		ContainerID: s.id,
+	}
 	return empty, nil
 }
 
@@ -270,6 +279,9 @@ func (s *Service) Resume(ctx context.Context, r *google_protobuf.Empty) (*google
 	}
 	if err := s.initProcess.Resume(ctx); err != nil {
 		return nil, err
+	}
+	s.events <- &events.TaskResumed{
+		ContainerID: s.id,
 	}
 	return empty, nil
 }
@@ -322,6 +334,9 @@ func (s *Service) Checkpoint(ctx context.Context, r *shimapi.CheckpointTaskReque
 	if err := s.initProcess.Checkpoint(ctx, r); err != nil {
 		return nil, err
 	}
+	s.events <- &events.TaskCheckpointed{
+		ContainerID: s.id,
+	}
 	return empty, nil
 }
 
@@ -346,10 +361,9 @@ func (s *Service) waitExit(p process, pid int, cmd *reaper.Cmd) {
 	p.Exited(status)
 
 	reaper.Default.Delete(pid)
-	s.events <- &events.RuntimeEvent{
-		Type:        events.RuntimeEvent_EXIT,
-		ID:          p.ID(),
+	s.events <- &events.TaskExit{
 		ContainerID: s.id,
+		ID:          p.ID(),
 		Pid:         uint32(pid),
 		ExitStatus:  uint32(status),
 		ExitedAt:    p.ExitedAt(),
@@ -366,4 +380,47 @@ func (s *Service) getContainerPids(ctx context.Context, id string) ([]uint32, er
 		pids = append(pids, uint32(pid))
 	}
 	return pids, nil
+}
+
+func (s *Service) forward(client poster) {
+	for e := range s.events {
+		a, err := typeurl.MarshalAny(e)
+		if err != nil {
+			log.G(s.context).WithError(err).Error("marshal event")
+			continue
+		}
+		if _, err := client.Post(s.context, &events.PostEventRequest{
+			Envelope: &events.Envelope{
+				Timestamp: time.Now(),
+				Topic:     "/task/" + getTopic(e),
+				Event:     a,
+			},
+		}); err != nil {
+			log.G(s.context).WithError(err).Error("post event")
+		}
+	}
+}
+
+func getTopic(e interface{}) string {
+	switch e.(type) {
+	case *events.TaskCreate:
+		return "task-create"
+	case *events.TaskStart:
+		return "task-start"
+	case *events.TaskOOM:
+		return "task-oom"
+	case *events.TaskExit:
+		return "task-exit"
+	case *events.TaskDelete:
+		return "task-delete"
+	case *events.TaskExecAdded:
+		return "task-exec-added"
+	case *events.TaskPaused:
+		return "task-paused"
+	case *events.TaskResumed:
+		return "task-resumed"
+	case *events.TaskCheckpointed:
+		return "task-checkpointed"
+	}
+	return "?"
 }

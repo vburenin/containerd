@@ -8,15 +8,12 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"google.golang.org/grpc"
 
 	"github.com/boltdb/bolt"
-	eventsapi "github.com/containerd/containerd/api/services/events/v1"
 	"github.com/containerd/containerd/api/types"
-	"github.com/containerd/containerd/containers"
-	"github.com/containerd/containerd/events"
+	"github.com/containerd/containerd/identifiers"
 	client "github.com/containerd/containerd/linux/shim"
 	shim "github.com/containerd/containerd/linux/shim/v1"
 	"github.com/containerd/containerd/log"
@@ -32,10 +29,8 @@ import (
 )
 
 var (
-	ErrTaskNotExists     = errors.New("task does not exist")
-	ErrTaskAlreadyExists = errors.New("task already exists")
-	pluginID             = fmt.Sprintf("%s.%s", plugin.RuntimePlugin, "linux")
-	empty                = &google_protobuf.Empty{}
+	pluginID = fmt.Sprintf("%s.%s", plugin.RuntimePlugin, "linux")
+	empty    = &google_protobuf.Empty{}
 )
 
 const (
@@ -69,6 +64,8 @@ type Config struct {
 	Runtime string `toml:"runtime,omitempty"`
 	// NoShim calls runc directly from within the pkg
 	NoShim bool `toml:"no_shim,omitempty"`
+	// Debug enable debug on the shim
+	ShimDebug bool `toml:"shim_debug,omitempty"`
 }
 
 func New(ic *plugin.InitContext) (interface{}, error) {
@@ -84,31 +81,23 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 		return nil, err
 	}
 	cfg := ic.Config.(*Config)
-	c, cancel := context.WithCancel(ic.Context)
 	r := &Runtime{
-		root:          ic.Root,
-		remote:        !cfg.NoShim,
-		shim:          cfg.Shim,
-		runtime:       cfg.Runtime,
-		events:        make(chan *eventsapi.RuntimeEvent, 2048),
-		eventsContext: c,
-		eventsCancel:  cancel,
-		monitor:       monitor.(runtime.TaskMonitor),
-		tasks:         newTaskList(),
-		emitter:       events.GetPoster(ic.Context),
-		db:            m.(*bolt.DB),
+		root:      ic.Root,
+		remote:    !cfg.NoShim,
+		shim:      cfg.Shim,
+		shimDebug: cfg.ShimDebug,
+		runtime:   cfg.Runtime,
+		monitor:   monitor.(runtime.TaskMonitor),
+		tasks:     runtime.NewTaskList(),
+		db:        m.(*bolt.DB),
+		address:   ic.Address,
 	}
-	// set the events output for a monitor if it generates events
-	r.monitor.Events(r.events)
 	tasks, err := r.restoreTasks(ic.Context)
 	if err != nil {
 		return nil, err
 	}
 	for _, t := range tasks {
-		if err := r.tasks.addWithNamespace(t.namespace, t); err != nil {
-			return nil, err
-		}
-		if err := r.handleEvents(ic.Context, t.shim); err != nil {
+		if err := r.tasks.AddWithNamespace(t.namespace, t); err != nil {
 			return nil, err
 		}
 	}
@@ -116,18 +105,16 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 }
 
 type Runtime struct {
-	root    string
-	shim    string
-	runtime string
-	remote  bool
+	root      string
+	shim      string
+	shimDebug bool
+	runtime   string
+	remote    bool
+	address   string
 
-	events        chan *eventsapi.RuntimeEvent
-	eventsContext context.Context
-	eventsCancel  func()
-	monitor       runtime.TaskMonitor
-	tasks         *taskList
-	emitter       events.Poster
-	db            *bolt.DB
+	monitor runtime.TaskMonitor
+	tasks   *runtime.TaskList
+	db      *bolt.DB
 }
 
 func (r *Runtime) ID() string {
@@ -139,6 +126,11 @@ func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts
 	if err != nil {
 		return nil, err
 	}
+
+	if err := identifiers.Validate(id); err != nil {
+		return nil, errors.Wrapf(err, "invalid task id")
+	}
+
 	bundle, err := newBundle(filepath.Join(r.root, namespace), namespace, id, opts.Spec.Value)
 	if err != nil {
 		return nil, err
@@ -148,7 +140,7 @@ func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts
 			bundle.Delete()
 		}
 	}()
-	s, err := bundle.NewShim(ctx, r.shim, r.remote)
+	s, err := bundle.NewShim(ctx, r.shim, r.address, r.remote, r.shimDebug)
 	if err != nil {
 		return nil, err
 	}
@@ -159,9 +151,6 @@ func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts
 			}
 		}
 	}()
-	if err = r.handleEvents(ctx, s); err != nil {
-		return nil, err
-	}
 	sopts := &shim.CreateTaskRequest{
 		ID:         id,
 		Bundle:     bundle.path,
@@ -184,34 +173,11 @@ func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts
 		return nil, errors.New(grpc.ErrorDesc(err))
 	}
 	t := newTask(id, namespace, s)
-	if err := r.tasks.add(ctx, t); err != nil {
+	if err := r.tasks.Add(ctx, t); err != nil {
 		return nil, err
 	}
 	// after the task is created, add it to the monitor
 	if err = r.monitor.Monitor(t); err != nil {
-		return nil, err
-	}
-
-	var runtimeMounts []*eventsapi.RuntimeMount
-	for _, m := range opts.Rootfs {
-		runtimeMounts = append(runtimeMounts, &eventsapi.RuntimeMount{
-			Type:    m.Type,
-			Source:  m.Source,
-			Options: m.Options,
-		})
-	}
-	if err := r.emit(ctx, "/runtime/create", &eventsapi.RuntimeCreate{
-		ContainerID: id,
-		Bundle:      bundle.path,
-		RootFS:      runtimeMounts,
-		IO: &eventsapi.RuntimeIO{
-			Stdin:    opts.IO.Stdin,
-			Stdout:   opts.IO.Stdout,
-			Stderr:   opts.IO.Stderr,
-			Terminal: opts.IO.Terminal,
-		},
-		Checkpoint: opts.Checkpoint,
-	}); err != nil {
 		return nil, err
 	}
 	return t, nil
@@ -236,41 +202,21 @@ func (r *Runtime) Delete(ctx context.Context, c runtime.Task) (*runtime.Exit, er
 	if err := lc.shim.KillShim(ctx); err != nil {
 		log.G(ctx).WithError(err).Error("failed to kill shim")
 	}
-	r.tasks.delete(ctx, lc)
+	r.tasks.Delete(ctx, lc)
 
-	var (
-		bundle = loadBundle(filepath.Join(r.root, namespace, lc.id), namespace)
-		i      = c.Info()
-	)
-	if err := r.emit(ctx, "/runtime/delete", &eventsapi.RuntimeDelete{
-		ContainerID: i.ID,
-		Runtime:     i.Runtime,
-		ExitStatus:  rsp.ExitStatus,
-		ExitedAt:    rsp.ExitedAt,
-	}); err != nil {
+	bundle := loadBundle(filepath.Join(r.root, namespace, lc.id), namespace)
+	if err := bundle.Delete(); err != nil {
 		return nil, err
 	}
 	return &runtime.Exit{
 		Status:    rsp.ExitStatus,
 		Timestamp: rsp.ExitedAt,
 		Pid:       rsp.Pid,
-	}, bundle.Delete()
+	}, nil
 }
 
 func (r *Runtime) Tasks(ctx context.Context) ([]runtime.Task, error) {
-	namespace, err := namespaces.NamespaceRequired(ctx)
-	if err != nil {
-		return nil, err
-	}
-	var o []runtime.Task
-	tasks, ok := r.tasks.tasks[namespace]
-	if !ok {
-		return o, nil
-	}
-	for _, t := range tasks {
-		o = append(o, t)
-	}
-	return o, nil
+	return r.tasks.GetAll(ctx)
 }
 
 func (r *Runtime) restoreTasks(ctx context.Context) ([]*Task, error) {
@@ -295,7 +241,7 @@ func (r *Runtime) restoreTasks(ctx context.Context) ([]*Task, error) {
 }
 
 func (r *Runtime) Get(ctx context.Context, id string) (runtime.Task, error) {
-	return r.tasks.get(ctx, id)
+	return r.tasks.Get(ctx, id)
 }
 
 func (r *Runtime) loadTasks(ctx context.Context, ns string) ([]*Task, error) {
@@ -332,48 +278,6 @@ func (r *Runtime) loadTasks(ctx context.Context, ns string) ([]*Task, error) {
 	return o, nil
 }
 
-func (r *Runtime) handleEvents(ctx context.Context, s *client.Client) error {
-	events, err := s.Stream(r.eventsContext, &shim.StreamEventsRequest{})
-	if err != nil {
-		return err
-	}
-	go r.forward(ctx, events)
-	return nil
-}
-
-// forward forwards events from a shim to the events service and monitors
-func (r *Runtime) forward(ctx context.Context, events shim.Shim_StreamClient) {
-	for {
-		e, err := events.Recv()
-		if err != nil {
-			if !strings.HasSuffix(err.Error(), "transport is closing") {
-				log.G(r.eventsContext).WithError(err).Error("get event from shim")
-			}
-			return
-		}
-		r.events <- e
-		if err := r.emit(ctx, "/runtime/"+getTopic(e), e); err != nil {
-			return
-		}
-	}
-}
-
-func getTopic(e *eventsapi.RuntimeEvent) string {
-	switch e.Type {
-	case eventsapi.RuntimeEvent_CREATE:
-		return "task-create"
-	case eventsapi.RuntimeEvent_START:
-		return "task-start"
-	case eventsapi.RuntimeEvent_EXEC_ADDED:
-		return "task-execadded"
-	case eventsapi.RuntimeEvent_OOM:
-		return "task-oom"
-	case eventsapi.RuntimeEvent_EXIT:
-		return "task-exit"
-	}
-	return ""
-}
-
 func (r *Runtime) terminate(ctx context.Context, bundle *bundle, ns, id string) error {
 	ctx = namespaces.WithNamespace(ctx, ns)
 	rt, err := r.getRuntime(ctx, ns, id)
@@ -392,11 +296,10 @@ func (r *Runtime) terminate(ctx context.Context, bundle *bundle, ns, id string) 
 }
 
 func (r *Runtime) getRuntime(ctx context.Context, ns, id string) (*runc.Runc, error) {
-	var c containers.Container
 	if err := r.db.View(func(tx *bolt.Tx) error {
 		store := metadata.NewContainerStore(tx)
 		var err error
-		c, err = store.Get(ctx, id)
+		_, err = store.Get(ctx, id)
 		return err
 	}); err != nil {
 		return nil, err
@@ -409,13 +312,4 @@ func (r *Runtime) getRuntime(ctx context.Context, ns, id string) (*runc.Runc, er
 		PdeathSignal: unix.SIGKILL,
 		Root:         filepath.Join(client.RuncRoot, ns),
 	}, nil
-}
-
-func (r *Runtime) emit(ctx context.Context, topic string, evt interface{}) error {
-	emitterCtx := events.WithTopic(ctx, topic)
-	if err := r.emitter.Post(emitterCtx, evt); err != nil {
-		return err
-	}
-
-	return nil
 }

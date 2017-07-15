@@ -3,10 +3,10 @@
 package cgroups
 
 import (
-	"time"
-
 	"github.com/containerd/cgroups"
 	events "github.com/containerd/containerd/api/services/events/v1"
+	evt "github.com/containerd/containerd/events"
+	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/runtime"
 	metrics "github.com/docker/go-metrics"
@@ -35,6 +35,7 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 		collector: collector,
 		oom:       oom,
 		context:   ic.Context,
+		emitter:   ic.Emitter,
 	}, nil
 }
 
@@ -42,7 +43,7 @@ type cgroupsMonitor struct {
 	collector *Collector
 	oom       *OOMCollector
 	context   context.Context
-	events    chan<- *events.RuntimeEvent
+	emitter   *evt.Emitter
 }
 
 func (m *cgroupsMonitor) Monitor(c runtime.Task) error {
@@ -67,15 +68,10 @@ func (m *cgroupsMonitor) Stop(c runtime.Task) error {
 	return nil
 }
 
-func (m *cgroupsMonitor) Events(events chan<- *events.RuntimeEvent) {
-	m.events = events
-}
-
 func (m *cgroupsMonitor) trigger(id string, cg cgroups.Cgroup) {
-	m.events <- &events.RuntimeEvent{
-		Timestamp:   time.Now(),
-		Type:        events.RuntimeEvent_OOM,
-		ID:          id,
+	if err := m.emitter.Post(m.context, &events.TaskOOM{
 		ContainerID: id,
+	}); err != nil {
+		log.G(m.context).WithError(err).Error("post OOM event")
 	}
 }
