@@ -21,6 +21,7 @@ import (
 	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/runtime"
+	"github.com/containerd/containerd/typeurl"
 	"github.com/go-openapi/swag"
 	"github.com/pkg/errors"
 )
@@ -52,8 +53,8 @@ type Runtime struct {
 	root string
 	mu   sync.Mutex
 
-	events    chan *events.RuntimeEvent
-	monEvents chan *events.RuntimeEvent
+	events    chan interface{}
+	monEvents chan interface{}
 
 	emitter ctdevents.Poster
 
@@ -83,8 +84,8 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 	c, cancel := context.WithCancel(ic.Context)
 	r := &Runtime{
 		root:          ic.Root,
-		events:        make(chan *events.RuntimeEvent, 4096),
-		monEvents:     make(chan *events.RuntimeEvent, 4096),
+		events:        make(chan interface{}, 4096),
+		monEvents:     make(chan interface{}, 4096),
 		emitter:       ctdevents.GetPoster(ic.Context),
 		eventsContext: c,
 		eventsCancel:  cancel,
@@ -99,8 +100,6 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 	}
 
 	r.startEventProcessor(c)
-
-	r.monitor.Events(r.monEvents)
 
 	return r, nil
 }
@@ -159,27 +158,7 @@ func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts
 		return nil, err
 	}
 
-	var runtimeMounts []*events.RuntimeMount
-	for _, m := range opts.Rootfs {
-		runtimeMounts = append(runtimeMounts, &events.RuntimeMount{
-			Type:    m.Type,
-			Source:  m.Source,
-			Options: m.Options,
-		})
-	}
-
-	if err := r.emit(ctx, "/runtime/create", &events.RuntimeCreate{
-		ContainerID: id,
-		Bundle:      path,
-		RootFS:      runtimeMounts,
-		IO: &events.RuntimeIO{
-			Stdin:    opts.IO.Stdin,
-			Stdout:   opts.IO.Stdout,
-			Stderr:   opts.IO.Stderr,
-			Terminal: opts.IO.Terminal,
-		},
-		Checkpoint: opts.Checkpoint,
-	}); err != nil {
+	if err = r.monitor.Monitor(s); err != nil {
 		return nil, err
 	}
 
@@ -211,16 +190,6 @@ func (r *Runtime) Tasks(ctx context.Context) ([]runtime.Task, error) {
 }
 
 func (r *Runtime) Delete(ctx context.Context, c runtime.Task) (*runtime.Exit, error) {
-
-	if err := r.emit(ctx, "/runtime/delete", &events.RuntimeDelete{
-		ContainerID: c.ID(),
-		Runtime:     pluginID,
-		ExitStatus:  0,
-		ExitedAt:    time.Now(),
-	}); err != nil {
-		return nil, err
-	}
-
 	return &runtime.Exit{
 		Status:    0,
 		Timestamp: time.Now(),
@@ -265,12 +234,11 @@ func (r *Runtime) adoptEvent(ctx context.Context, be *BaseEvent) {
 	log.G(ctx).Debugf("Received container event: %s for %s(%s)", be.Event, be.Ref, id)
 	switch be.Event {
 	case vwevents.ContainerPoweredOff:
-		r.events <- &events.RuntimeEvent{
-			ID:         id,
-			Type:       events.RuntimeEvent_EXIT,
-			Pid:        1,
-			Timestamp:  be.CreatedTime,
-			ExitStatus: 0,
+		r.events <- &events.TaskExit{
+			ContainerID: id,
+			Pid:         1,
+			ExitStatus:  0,
+			ExitedAt:    be.CreatedTime,
 		}
 		task.CloseIO(ctx)
 	default:
@@ -294,41 +262,50 @@ func (r *Runtime) startEventProcessor(ctx context.Context) {
 	go r.pl.Events.GetEvents(plevents.NewGetEventsParamsWithContext(ctx), eventer)
 
 	go func() {
-		eventProc := func(e *events.RuntimeEvent) error {
-			r.monEvents <- e
-			if err := r.emit(ctx, "/runtime/"+getTopic(e), e); err != nil {
-				return err
-			}
-			return nil
-		}
-		for {
-			select {
-			case e := <-r.events:
-				eventProc(e)
-			case <-ctx.Done():
-				close(r.events)
-			}
-		}
 		for e := range r.events {
-			if eventProc(e) != nil {
+			// r.monEvents <- e
+			a, err := typeurl.MarshalAny(e)
+			if err != nil {
+				log.G(ctx).WithError(err).Error("marshal event")
 				return
+			}
+
+			topic := "/task/" + getTopic(e)
+			ctx = ctdevents.WithTopic(ctx, topic)
+			err = r.emitter.Post(ctx, &events.Envelope{
+				Timestamp: time.Now(),
+				Topic:     topic,
+				Event:     a,
+			})
+
+			if err != nil {
+				log.G(ctx).WithError(err).Error("post event")
 			}
 		}
 		log.G(ctx).Infof("Exited event processor")
 	}()
 }
-func getTopic(e *events.RuntimeEvent) string {
-	switch e.Type {
-	case events.RuntimeEvent_CREATE:
+
+func getTopic(e interface{}) string {
+	switch e.(type) {
+	case *events.TaskCreate:
 		return "task-create"
-	case events.RuntimeEvent_START:
+	case *events.TaskStart:
 		return "task-start"
-	case events.RuntimeEvent_EXEC_ADDED:
-		return "task-execadded"
-	case events.RuntimeEvent_OOM:
+	case *events.TaskOOM:
 		return "task-oom"
-	case events.RuntimeEvent_EXIT:
+	case *events.TaskExit:
 		return "task-exit"
+	case *events.TaskDelete:
+		return "task-delete"
+	case *events.TaskExecAdded:
+		return "task-exec-added"
+	case *events.TaskPaused:
+		return "task-paused"
+	case *events.TaskResumed:
+		return "task-resumed"
+	case *events.TaskCheckpointed:
+		return "task-checkpointed"
 	}
-	return ""
+	return "?"
 }

@@ -7,7 +7,8 @@ import (
 	"sync"
 	"time"
 
-	eventsapi "github.com/containerd/containerd/api/services/events/v1"
+	"github.com/containerd/containerd/api/services/events/v1"
+	containerd_types "github.com/containerd/containerd/api/types"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plapi/client"
@@ -76,7 +77,7 @@ type VicTasker struct {
 	mu      sync.Mutex
 	main    *VicTask
 	other   map[string]*VicTask
-	events  chan *eventsapi.RuntimeEvent
+	events  chan interface{}
 	pl      *client.PortLayer
 	spec    *specs.Spec
 	binSpec []byte
@@ -89,7 +90,7 @@ type VicTasker struct {
 }
 
 func NewVicTasker(ctx context.Context, pl *client.PortLayer,
-	events chan *eventsapi.RuntimeEvent,
+	events chan interface{},
 	storage, root, id string) *VicTasker {
 
 	return &VicTasker{
@@ -227,11 +228,28 @@ func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error 
 
 	CommitHandle(ctx, vt.pl, handle)
 
-	vt.events <- &eventsapi.RuntimeEvent{
-		ID:        vt.id,
-		Type:      eventsapi.RuntimeEvent_CREATE,
-		Timestamp: time.Now(),
-		Pid:       1,
+	var runtimeMounts []*containerd_types.Mount
+	for _, m := range opts.Rootfs {
+		runtimeMounts = append(runtimeMounts, &containerd_types.Mount{
+			Type:    m.Type,
+			Source:  m.Source,
+			Options: m.Options,
+			Target:  "/",
+		})
+	}
+
+	vt.events <- &events.TaskCreate{
+		ContainerID: vt.id,
+		Bundle:      vt.root,
+		Rootfs:      runtimeMounts,
+		IO: &events.TaskIO{
+			Stdin:    opts.IO.Stdin,
+			Stdout:   opts.IO.Stdout,
+			Stderr:   opts.IO.Stderr,
+			Terminal: opts.IO.Terminal,
+		},
+		Checkpoint: opts.Checkpoint,
+		Pid:        1,
 	}
 
 	vicProc := NewVicProc(vt.pl, vt.id, vt.vid, vt.root, opts)
@@ -304,11 +322,10 @@ func (vt *VicTasker) Start(ctx context.Context) error {
 	if err != nil {
 		log.G(ctx).Errorf("Failed to start container IO")
 	}
-	vt.events <- &eventsapi.RuntimeEvent{
-		Pid:       1,
-		ID:        vt.id,
-		Timestamp: time.Now(),
-		Type:      eventsapi.RuntimeEvent_START,
+
+	vt.events <- &events.TaskStart{
+		Pid:         1,
+		ContainerID: vt.id,
 	}
 	return nil
 }
