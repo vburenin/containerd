@@ -100,7 +100,7 @@ func (p *VicTask) RunIO() error {
 			if err != nil {
 				log.G(ctx).Errorf("STDIN error happened: %s", err)
 			}
-			log.G(ctx).Debugf("STDIN connection has been closed: %s", p.vid)
+			log.G(ctx).Debugf("STDIN connection has been closed: %s", p.id)
 		}()
 	}
 
@@ -119,7 +119,7 @@ func (p *VicTask) RunIO() error {
 			if err != nil {
 				log.G(ctx).Errorf("STDOUT error happened: %s", err)
 			}
-			log.G(ctx).Debugf("STDOUT connection has been closed: %s", p.vid)
+			log.G(ctx).Debugf("STDOUT connection has been closed: %s", p.id)
 
 		}()
 	}

@@ -289,6 +289,8 @@ func (vt *VicTasker) Info() runtime.TaskInfo {
 
 func (vt *VicTasker) Start(ctx context.Context) error {
 	vt.mu.Lock()
+	defer vt.mu.Unlock()
+
 	handle, err := GetHandle(ctx, vt.pl, vt.vid)
 	if err != nil {
 		return fmt.Errorf("Container not found: %s", vt.id)

@@ -173,12 +173,12 @@ func (vs *VicSnap) addActive(snapType, key, parent string) []mount.Mount {
 }
 
 func (vs *VicSnap) prepareSnapshot(ctx context.Context, snapType, key, parent string) ([]mount.Mount, error) {
-	log.G(ctx).Debugf("Preparing snapshot %s:%s/%s", snapType, parent, key)
+	keyID := mounts.HashKey(key)
+	parentID := mounts.HashParent(parent)
+	log.G(ctx).Debugf("Preparing snapshot %s:%s/%s, key: %s", snapType, parent, key, keyID)
 	vs.mu.Lock()
 	defer vs.mu.Unlock()
 
-	keyID := mounts.HashKey(key)
-	parentID := mounts.HashParent(parent)
 	if _, ok := vs.snapshots[keyID]; ok {
 		return nil, errors.Wrapf(errdefs.ErrAlreadyExists, "snapshot %v", key)
 	}
