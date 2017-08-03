@@ -6,13 +6,16 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
 
-	"github.com/containerd/cgroups"
+	// Register the typeurl
+	_ "github.com/containerd/containerd/runtime"
+
 	"github.com/containerd/containerd/errdefs"
-	specs "github.com/opencontainers/runtime-spec/specs-go"
 )
 
 func empty() IOCreation {
@@ -48,7 +51,7 @@ func TestNewContainer(t *testing.T) {
 	}
 	defer client.Close()
 
-	spec, err := GenerateSpec()
+	spec, err := generateSpec()
 	if err != nil {
 		t.Error(err)
 		return
@@ -84,27 +87,31 @@ func TestContainerStart(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withExitStatus(7))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("sh", "-c", "exit 7"))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	task, err := container.NewTask(ctx, Stdio)
 	if err != nil {
@@ -151,28 +158,32 @@ func TestContainerOutput(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 		expected    = "kingkoye"
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("echo", expected))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("echo", expected))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	stdout := bytes.NewBuffer(nil)
 	task, err := container.NewTask(ctx, NewIO(bytes.NewBuffer(nil), stdout, bytes.NewBuffer(nil)))
@@ -207,7 +218,7 @@ func TestContainerOutput(t *testing.T) {
 
 	actual := stdout.String()
 	// echo adds a new line
-	expected = expected + "\n"
+	expected = expected + newLine
 	if actual != expected {
 		t.Errorf("expected output %q but received %q", expected, actual)
 	}
@@ -221,27 +232,31 @@ func TestContainerExec(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("sleep", "100"))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("sleep", "100"))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -258,12 +273,14 @@ func TestContainerExec(t *testing.T) {
 		close(finished)
 	}()
 
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+
 	// start an exec process without running the original container process info
 	processSpec := spec.Process
-	processSpec.Args = []string{
-		"sh", "-c",
-		"exit 6",
-	}
+	withExecExitStatus(processSpec, 6)
 	execID := t.Name() + "_exec"
 	process, err := task.Exec(ctx, execID, processSpec, empty())
 	if err != nil {
@@ -275,7 +292,6 @@ func TestContainerExec(t *testing.T) {
 		status, err := process.Wait(ctx)
 		if err != nil {
 			t.Error(err)
-			return
 		}
 		processStatusC <- status
 	}()
@@ -305,7 +321,7 @@ func TestContainerExec(t *testing.T) {
 	<-finished
 }
 
-func TestContainerProcesses(t *testing.T) {
+func TestContainerPids(t *testing.T) {
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -313,27 +329,31 @@ func TestContainerProcesses(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("sleep", "100"))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("sleep", "100"))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -350,6 +370,11 @@ func TestContainerProcesses(t *testing.T) {
 		}
 		statusC <- status
 	}()
+
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
 
 	pid := task.Pid()
 	if pid <= 0 {
@@ -383,29 +408,33 @@ func TestContainerCloseIO(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
-	if err != nil {
-		t.Error(err)
-		return
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("cat"))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithRootFSDeletion)
 
-	const expected = "hello\n"
+	spec, err := generateSpec(withImageConfig(ctx, image), withCat())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	const expected = "hello" + newLine
 	stdout := bytes.NewBuffer(nil)
 
 	r, w, err := os.Pipe()
@@ -451,12 +480,25 @@ func TestContainerCloseIO(t *testing.T) {
 
 	output := stdout.String()
 
+	if runtime.GOOS == "windows" {
+		// On windows we use more and it always adds an extra newline
+		// remove it here
+		output = strings.TrimSuffix(output, newLine)
+	}
+
 	if output != expected {
 		t.Errorf("expected output %q but received %q", expected, output)
 	}
 }
 
 func TestContainerAttach(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		// On windows, closing the write side of the pipe closes the read
+		// side, sending an EOF to it and preventing reopening it.
+		// Hence this test will always fails on windows
+		t.Skip("invalid logic on windows")
+	}
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -464,29 +506,33 @@ func TestContainerAttach(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
-	if err != nil {
-		t.Error(err)
-		return
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("cat"))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithRootFSDeletion)
 
-	expected := "hello\n"
+	spec, err := generateSpec(withImageConfig(ctx, image), withCat())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	expected := "hello" + newLine
 	stdout := bytes.NewBuffer(nil)
 
 	r, w, err := os.Pipe()
@@ -586,27 +632,31 @@ func TestDeleteRunningContainer(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("sleep", "100"))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("sleep", "100"))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -629,7 +679,7 @@ func TestDeleteRunningContainer(t *testing.T) {
 		return
 	}
 
-	err = container.Delete(ctx, WithRootFSDeletion)
+	err = container.Delete(ctx, WithSnapshotCleanup)
 	if err == nil {
 		t.Error("delete did not error with running task")
 	}
@@ -651,22 +701,26 @@ func TestContainerKill(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withCat())
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("sh", "-c", "cat"))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithImage(image), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
@@ -709,7 +763,7 @@ func TestContainerKill(t *testing.T) {
 	}
 }
 
-func TestContainerUpdate(t *testing.T) {
+func TestContainerNoBinaryExists(t *testing.T) {
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -717,33 +771,167 @@ func TestContainerUpdate(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("nothing"))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("sleep", "30"))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	limit := int64(32 * 1024 * 1024)
-	spec.Linux.Resources.Memory = &specs.LinuxMemory{
-		Limit: &limit,
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	task, err := container.NewTask(ctx, Stdio)
+	switch runtime.GOOS {
+	case "windows":
+		if err != nil {
+			t.Errorf("failed to create task %v", err)
+		}
+		if err := task.Start(ctx); err != nil {
+			t.Error("task.Start() should return an error when binary does not exist")
+			task.Delete(ctx)
+		}
+	default:
+		if err == nil {
+			t.Error("NewTask should return an error when binary does not exist")
+			task.Delete(ctx)
+		}
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
+}
+
+func TestContainerExecNoBinaryExists(t *testing.T) {
+	client, err := newClient(t, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var (
+		image       Image
+		ctx, cancel = testContext()
+		id          = t.Name()
+	)
+	defer cancel()
+
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("sleep", "100"))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	task, err := container.NewTask(ctx, empty())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer task.Delete(ctx)
+
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+
+	finished := make(chan struct{}, 1)
+	go func() {
+		if _, err := task.Wait(ctx); err != nil {
+			t.Error(err)
+		}
+		close(finished)
+	}()
+
+	// start an exec process without running the original container process
+	processSpec := spec.Process
+	processSpec.Args = []string{
+		"none",
+	}
+	execID := t.Name() + "_exec"
+	process, err := task.Exec(ctx, execID, processSpec, empty())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer process.Delete(ctx)
+	if err := process.Start(ctx); err == nil {
+		t.Error("Process.Start should fail when process does not exist")
+	}
+	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
+		t.Error(err)
+	}
+	<-finished
+}
+
+func TestUserNamespaces(t *testing.T) {
+	client, err := newClient(t, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var (
+		image       Image
+		ctx, cancel = testContext()
+		id          = t.Name()
+	)
+	defer cancel()
+
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(
+		withImageConfig(ctx, image),
+		withExitStatus(7),
+		withUserNamespace(0, 1000, 10000),
+	)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	container, err := client.NewContainer(ctx, id,
+		WithSpec(spec),
+		withRemappedSnapshot(id, image, 1000, 1000),
+	)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	task, err := container.NewTask(ctx, Stdio)
 	if err != nil {
 		t.Error(err)
 		return
@@ -759,46 +947,98 @@ func TestContainerUpdate(t *testing.T) {
 		statusC <- status
 	}()
 
-	// check that the task has a limit of 32mb
-	cgroup, err := cgroups.Load(cgroups.V1, cgroups.PidPath(int(task.Pid())))
+	if pid := task.Pid(); pid <= 0 {
+		t.Errorf("invalid task pid %d", pid)
+	}
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		task.Delete(ctx)
+		return
+	}
+	status := <-statusC
+	if status != 7 {
+		t.Errorf("expected status 7 from wait but received %d", status)
+	}
+	if status, err = task.Delete(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+	if status != 7 {
+		t.Errorf("expected status 7 from delete but received %d", status)
+	}
+}
+
+func TestWaitStoppedTask(t *testing.T) {
+	client, err := newClient(t, address)
 	if err != nil {
-		t.Error(err)
-		return
+		t.Fatal(err)
 	}
-	stat, err := cgroup.Stat(cgroups.IgnoreNotExist)
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	if int64(stat.Memory.Usage.Limit) != limit {
-		t.Errorf("expected memory limit to be set to %d but received %d", limit, stat.Memory.Usage.Limit)
-		return
-	}
-	limit = 64 * 1024 * 1024
-	if err := task.Update(ctx, WithResources(&specs.LinuxResources{
-		Memory: &specs.LinuxMemory{
-			Limit: &limit,
-		},
-	})); err != nil {
-		t.Error(err)
-	}
-	// check that the task has a limit of 64mb
-	if stat, err = cgroup.Stat(cgroups.IgnoreNotExist); err != nil {
-		t.Error(err)
-		return
-	}
-	if int64(stat.Memory.Usage.Limit) != limit {
-		t.Errorf("expected memory limit to be set to %d but received %d", limit, stat.Memory.Usage.Limit)
-	}
-	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
-		t.Error(err)
-		return
+	defer client.Close()
+
+	var (
+		image       Image
+		ctx, cancel = testContext()
+		id          = t.Name()
+	)
+	defer cancel()
+
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
 	}
 
+	spec, err := generateSpec(withImageConfig(ctx, image), withExitStatus(7))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	task, err := container.NewTask(ctx, Stdio)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer task.Delete(ctx)
+
+	statusC := make(chan uint32, 1)
+	go func() {
+		status, err := task.Wait(ctx)
+		if err != nil {
+			t.Error(err)
+		}
+		statusC <- status
+	}()
+
+	if pid := task.Pid(); pid <= 0 {
+		t.Errorf("invalid task pid %d", pid)
+	}
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		task.Delete(ctx)
+		return
+	}
+	// wait for the task to stop then call wait again
 	<-statusC
+	_, err = task.Wait(ctx)
+	if err == nil {
+		t.Error("Wait after task exits should return an error")
+		return
+	}
+	if !errdefs.IsUnavailable(err) {
+		t.Errorf("Wait should return %q when task Stopped: %v", errdefs.ErrUnavailable, err)
+	}
 }
 
-func TestContainerNoBinaryExists(t *testing.T) {
+func TestWaitStoppedProcess(t *testing.T) {
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -806,62 +1046,31 @@ func TestContainerNoBinaryExists(t *testing.T) {
 	defer client.Close()
 
 	var (
+		image       Image
 		ctx, cancel = testContext()
 		id          = t.Name()
 	)
 	defer cancel()
 
-	image, err := client.GetImage(ctx, testImage)
-	if err != nil {
-		t.Error(err)
-		return
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("nothing"))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithRootFSDeletion)
 
-	if _, err := container.NewTask(ctx, Stdio); err == nil {
-		t.Error("NewTask should return an error when binary does not exist")
-	}
-}
-
-func TestContainerExecNoBinaryExists(t *testing.T) {
-	client, err := newClient(t, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-
-	var (
-		ctx, cancel = testContext()
-		id          = t.Name()
-	)
-	defer cancel()
-
-	image, err := client.GetImage(ctx, testImage)
+	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("sleep", "100"))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	spec, err := GenerateSpec(WithImageConfig(ctx, image), WithProcessArgs("sleep", "100"))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -878,11 +1087,14 @@ func TestContainerExecNoBinaryExists(t *testing.T) {
 		close(finished)
 	}()
 
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+
 	// start an exec process without running the original container process info
 	processSpec := spec.Process
-	processSpec.Args = []string{
-		"none",
-	}
+	withExecExitStatus(processSpec, 6)
 	execID := t.Name() + "_exec"
 	process, err := task.Exec(ctx, execID, processSpec, empty())
 	if err != nil {
@@ -890,8 +1102,30 @@ func TestContainerExecNoBinaryExists(t *testing.T) {
 		return
 	}
 	defer process.Delete(ctx)
-	if err := process.Start(ctx); err == nil {
-		t.Error("Process.Start should fail when process does not exist")
+	processStatusC := make(chan uint32, 1)
+	go func() {
+		status, err := process.Wait(ctx)
+		if err != nil {
+			t.Error(err)
+		}
+		processStatusC <- status
+	}()
+
+	if err := process.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+
+	// wait for the exec to return
+	<-processStatusC
+	// try to wait on the process after it has stopped
+	_, err = process.Wait(ctx)
+	if err == nil {
+		t.Error("Wait after process exits should return an error")
+		return
+	}
+	if !errdefs.IsUnavailable(err) {
+		t.Errorf("Wait should return %q when process has exited: %v", errdefs.ErrUnavailable, err)
 	}
 	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
 		t.Error(err)

@@ -4,12 +4,12 @@ import (
 	gocontext "context"
 	"syscall"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/containerd/console"
 	"github.com/containerd/containerd"
 	digest "github.com/opencontainers/go-digest"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
@@ -25,7 +25,7 @@ func withEnv(context *cli.Context) containerd.SpecOpts {
 	return func(s *specs.Spec) error {
 		env := context.StringSlice("env")
 		if len(env) > 0 {
-			s.Process.Env = append(s.Process.Env, env...)
+			s.Process.Env = replaceOrAppendEnvValues(s.Process.Env, env)
 		}
 		return nil
 	}
@@ -47,7 +47,7 @@ func withMounts(context *cli.Context) containerd.SpecOpts {
 var runCommand = cli.Command{
 	Name:      "run",
 	Usage:     "run a container",
-	ArgsUsage: "IMAGE CONTAINER [COMMAND] [ARG...]",
+	ArgsUsage: "Image|RootFS ID [COMMAND] [ARG...]",
 	Flags: append([]cli.Flag{
 		cli.BoolFlag{
 			Name:  "tty,t",
@@ -119,7 +119,7 @@ var runCommand = cli.Command{
 			return err
 		}
 		if context.Bool("rm") {
-			defer container.Delete(ctx, containerd.WithRootFSDeletion)
+			defer container.Delete(ctx, containerd.WithSnapshotCleanup)
 		}
 		task, err := newTask(ctx, container, checkpointIndex, tty)
 		if err != nil {

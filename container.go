@@ -11,6 +11,7 @@ import (
 	"github.com/containerd/containerd/api/types"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/typeurl"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
@@ -107,8 +108,8 @@ func (c *container) Spec() (*specs.Spec, error) {
 	return &s, nil
 }
 
-// WithRootFSDeletion deletes the rootfs allocated for the container
-func WithRootFSDeletion(ctx context.Context, client *Client, c containers.Container) error {
+// WithSnapshotCleanup deletes the rootfs allocated for the container
+func WithSnapshotCleanup(ctx context.Context, client *Client, c containers.Container) error {
 	if c.RootFS != "" {
 		return client.SnapshotService(c.Snapshotter).Remove(ctx, c.RootFS)
 	}
@@ -154,10 +155,17 @@ func (c *container) Image(ctx context.Context) (Image, error) {
 
 type NewTaskOpts func(context.Context, *Client, *TaskInfo) error
 
+func WithRootFS(mounts []mount.Mount) NewTaskOpts {
+	return func(ctx context.Context, c *Client, ti *TaskInfo) error {
+		ti.RootFS = mounts
+		return nil
+	}
+}
+
 func (c *container) NewTask(ctx context.Context, ioCreate IOCreation, opts ...NewTaskOpts) (Task, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	i, err := ioCreate()
+	i, err := ioCreate(c.c.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +196,15 @@ func (c *container) NewTask(ctx context.Context, ioCreate IOCreation, opts ...Ne
 			return nil, err
 		}
 	}
+	if info.RootFS != nil {
+		for _, m := range info.RootFS {
+			request.Rootfs = append(request.Rootfs, &types.Mount{
+				Type:    m.Type,
+				Source:  m.Source,
+				Options: m.Options,
+			})
+		}
+	}
 	if info.Options != nil {
 		any, err := typeurl.MarshalAny(info.Options)
 		if err != nil {
@@ -215,7 +232,7 @@ func (c *container) NewTask(ctx context.Context, ioCreate IOCreation, opts ...Ne
 }
 
 func (c *container) loadTask(ctx context.Context, ioAttach IOAttach) (Task, error) {
-	response, err := c.client.TaskService().Get(ctx, &tasks.GetTaskRequest{
+	response, err := c.client.TaskService().Get(ctx, &tasks.GetRequest{
 		ContainerID: c.c.ID,
 	})
 	if err != nil {
@@ -230,14 +247,14 @@ func (c *container) loadTask(ctx context.Context, ioAttach IOAttach) (Task, erro
 		// get the existing fifo paths from the task information stored by the daemon
 		paths := &FIFOSet{
 			Dir: getFifoDir([]string{
-				response.Task.Stdin,
-				response.Task.Stdout,
-				response.Task.Stderr,
+				response.Process.Stdin,
+				response.Process.Stdout,
+				response.Process.Stderr,
 			}),
-			In:       response.Task.Stdin,
-			Out:      response.Task.Stdout,
-			Err:      response.Task.Stderr,
-			Terminal: response.Task.Terminal,
+			In:       response.Process.Stdin,
+			Out:      response.Process.Stdout,
+			Err:      response.Process.Stderr,
+			Terminal: response.Process.Terminal,
 		}
 		if i, err = ioAttach(paths); err != nil {
 			return nil, err
@@ -246,8 +263,8 @@ func (c *container) loadTask(ctx context.Context, ioAttach IOAttach) (Task, erro
 	t := &task{
 		client: c.client,
 		io:     i,
-		id:     response.Task.ID,
-		pid:    response.Task.Pid,
+		id:     response.Process.ID,
+		pid:    response.Process.Pid,
 	}
 	return t, nil
 }

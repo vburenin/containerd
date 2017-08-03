@@ -1,3 +1,5 @@
+// +build !windows
+
 package containerd
 
 import (
@@ -31,12 +33,12 @@ func TestCheckpointRestore(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -121,12 +123,12 @@ func TestCheckpointRestoreNewContainer(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {
@@ -161,7 +163,7 @@ func TestCheckpointRestoreNewContainer(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	if err := container.Delete(ctx, WithRootFSDeletion); err != nil {
+	if err := container.Delete(ctx, WithSnapshotCleanup); err != nil {
 		t.Error(err)
 		return
 	}
@@ -224,12 +226,12 @@ func TestCheckpointLeaveRunning(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewRootFS(id, image))
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), WithNewSnapshot(id, image))
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	defer container.Delete(ctx, WithRootFSDeletion)
+	defer container.Delete(ctx, WithSnapshotCleanup)
 
 	task, err := container.NewTask(ctx, empty())
 	if err != nil {

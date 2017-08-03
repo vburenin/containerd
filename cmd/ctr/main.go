@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/Sirupsen/logrus"
-	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/namespaces"
+	"github.com/containerd/containerd/server"
 	"github.com/containerd/containerd/version"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
@@ -40,7 +40,7 @@ containerd CLI
 		cli.StringFlag{
 			Name:  "address, a",
 			Usage: "address for containerd's GRPC server",
-			Value: containerd.DefaultAddress,
+			Value: server.DefaultAddress,
 		},
 		cli.DurationFlag{
 			Name:  "timeout",
@@ -58,31 +58,31 @@ containerd CLI
 		},
 	}
 	app.Commands = append([]cli.Command{
-		imageCommand,
-		pullCommand,
+		applyCommand,
+		attachCommand,
+		checkpointCommand,
+		containersCommand,
+		contentCommand,
+		eventsCommand,
+		execCommand,
 		fetchCommand,
 		fetchObjectCommand,
-		pushCommand,
-		pushObjectCommand,
-		containersCommand,
-		checkpointCommand,
-		runCommand,
-		attachCommand,
-		deleteCommand,
-		namespacesCommand,
-		eventsCommand,
-		taskListCommand,
+		imageCommand,
 		infoCommand,
 		killCommand,
-		pprofCommand,
-		execCommand,
+		namespacesCommand,
 		pauseCommand,
-		resumeCommand,
-		snapshotCommand,
-		versionCommand,
+		pprofCommand,
 		psCommand,
-		applyCommand,
+		pullCommand,
+		pushCommand,
+		pushObjectCommand,
+		resumeCommand,
 		rootfsCommand,
+		runCommand,
+		snapshotCommand,
+		taskListCommand,
+		versionCommand,
 	}, extraCmds...)
 	app.Before = func(context *cli.Context) error {
 		if context.GlobalBool("debug") {
@@ -102,6 +102,7 @@ var containersCommand = cli.Command{
 	Aliases: []string{"c"},
 	Subcommands: []cli.Command{
 		containersListCommand,
+		containersDeleteCommand,
 		containersSetLabelsCommand,
 	},
 }

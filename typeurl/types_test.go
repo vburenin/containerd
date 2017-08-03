@@ -1,12 +1,9 @@
 package typeurl
 
 import (
-	"fmt"
 	"path/filepath"
 	"reflect"
 	"testing"
-
-	eventsapi "github.com/containerd/containerd/api/services/events/v1"
 )
 
 type test struct {
@@ -48,6 +45,17 @@ func TestMarshal(t *testing.T) {
 	if any.TypeUrl != expected {
 		t.Fatalf("expected %q but received %q", expected, any.TypeUrl)
 	}
+
+	// marshal it again and make sure we get the same thing back.
+	newany, err := MarshalAny(any)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if newany != any { // you that right: we want the same *pointer*!
+		t.Fatalf("expected to get back same object: %v != %v", newany, any)
+	}
+
 }
 
 func TestMarshalUnmarshal(t *testing.T) {
@@ -95,54 +103,13 @@ func TestIs(t *testing.T) {
 	}
 }
 
-func TestMarshalEvent(t *testing.T) {
-	for _, testcase := range []struct {
-		event interface{}
-		url   string
-	}{
-		{
-			event: &eventsapi.TaskStart{},
-			url:   "types.containerd.io/containerd.services.events.v1.TaskStart",
-		},
-
-		{
-			event: &eventsapi.NamespaceUpdate{},
-			url:   "types.containerd.io/containerd.services.events.v1.NamespaceUpdate",
-		},
-	} {
-		t.Run(fmt.Sprintf("%T", testcase.event), func(t *testing.T) {
-			a, err := MarshalAny(testcase.event)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if a.TypeUrl != testcase.url {
-				t.Fatalf("unexpected url: %v != %v", a.TypeUrl, testcase.url)
-			}
-
-			v, err := UnmarshalAny(a)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(v, testcase.event) {
-				t.Fatalf("round trip failed %v != %v", v, testcase.event)
-			}
-		})
-	}
-}
-
-func BenchmarkMarshalEvent(b *testing.B) {
-	ev := &eventsapi.TaskStart{}
-	expected, err := MarshalAny(ev)
-	if err != nil {
-		b.Fatal(err)
-	}
-	for i := 0; i < b.N; i++ {
-		a, err := MarshalAny(ev)
-		if err != nil {
-			b.Fatal(err)
+func TestRegisterDiffUrls(t *testing.T) {
+	clear()
+	defer func() {
+		if err := recover(); err == nil {
+			t.Error("registering the same type with different urls should panic")
 		}
-		if a.TypeUrl != expected.TypeUrl {
-			b.Fatalf("incorrect type url: %v != %v", a, expected)
-		}
-	}
+	}()
+	Register(&test{}, "test")
+	Register(&test{}, "test", "two")
 }

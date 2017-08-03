@@ -67,20 +67,19 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 		r := rr.(runtime.Runtime)
 		runtimes[r.ID()] = r
 	}
-	e := events.GetPoster(ic.Context)
 	return &Service{
-		runtimes: runtimes,
-		db:       m.(*bolt.DB),
-		store:    cs,
-		emitter:  e,
+		runtimes:  runtimes,
+		db:        m.(*bolt.DB),
+		store:     cs,
+		publisher: ic.Events,
 	}, nil
 }
 
 type Service struct {
-	runtimes map[string]runtime.Runtime
-	db       *bolt.DB
-	store    content.Store
-	emitter  events.Poster
+	runtimes  map[string]runtime.Runtime
+	db        *bolt.DB
+	store     content.Store
+	publisher events.Publisher
 }
 
 func (s *Service) Register(server *grpc.Server) error {
@@ -153,16 +152,27 @@ func (s *Service) Create(ctx context.Context, r *api.CreateTaskRequest) (*api.Cr
 	}, nil
 }
 
-func (s *Service) Start(ctx context.Context, r *api.StartTaskRequest) (*google_protobuf.Empty, error) {
+func (s *Service) Start(ctx context.Context, r *api.StartRequest) (*api.StartResponse, error) {
 	t, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
-	if err := t.Start(ctx); err != nil {
+	p := runtime.Process(t)
+	if r.ExecID != "" {
+		if p, err = t.Process(ctx, r.ExecID); err != nil {
+			return nil, err
+		}
+	}
+	if err := p.Start(ctx); err != nil {
 		return nil, err
 	}
-
-	return empty, nil
+	state, err := p.State(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return &api.StartResponse{
+		Pid: state.Pid,
+	}, nil
 }
 
 func (s *Service) Delete(ctx context.Context, r *api.DeleteTaskRequest) (*api.DeleteResponse, error) {
@@ -202,8 +212,8 @@ func (s *Service) DeleteProcess(ctx context.Context, r *api.DeleteProcessRequest
 	}, nil
 }
 
-func taskFromContainerd(ctx context.Context, c runtime.Task) (*task.Task, error) {
-	state, err := c.State(ctx)
+func processFromContainerd(ctx context.Context, p runtime.Process) (*task.Process, error) {
+	state, err := p.State(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -220,8 +230,8 @@ func taskFromContainerd(ctx context.Context, c runtime.Task) (*task.Task, error)
 	default:
 		log.G(ctx).WithField("status", state.Status).Warn("unknown status")
 	}
-	return &task.Task{
-		ID:       c.Info().ID,
+	return &task.Process{
+		ID:       p.ID(),
 		Pid:      state.Pid,
 		Status:   status,
 		Stdin:    state.Stdin,
@@ -231,17 +241,23 @@ func taskFromContainerd(ctx context.Context, c runtime.Task) (*task.Task, error)
 	}, nil
 }
 
-func (s *Service) Get(ctx context.Context, r *api.GetTaskRequest) (*api.GetTaskResponse, error) {
+func (s *Service) Get(ctx context.Context, r *api.GetRequest) (*api.GetResponse, error) {
 	task, err := s.getTask(ctx, r.ContainerID)
 	if err != nil {
 		return nil, err
 	}
-	t, err := taskFromContainerd(ctx, task)
+	p := runtime.Process(task)
+	if r.ExecID != "" {
+		if p, err = task.Process(ctx, r.ExecID); err != nil {
+			return nil, err
+		}
+	}
+	t, err := processFromContainerd(ctx, p)
 	if err != nil {
 		return nil, err
 	}
-	return &api.GetTaskResponse{
-		Task: t,
+	return &api.GetResponse{
+		Process: t,
 	}, nil
 }
 
@@ -253,7 +269,7 @@ func (s *Service) List(ctx context.Context, r *api.ListTasksRequest) (*api.ListT
 			return nil, err
 		}
 		for _, t := range tasks {
-			tt, err := taskFromContainerd(ctx, t)
+			tt, err := processFromContainerd(ctx, t)
 			if err != nil {
 				return nil, err
 			}
@@ -318,7 +334,7 @@ func (s *Service) ListPids(ctx context.Context, r *api.ListPidsRequest) (*api.Li
 	}, nil
 }
 
-func (s *Service) Exec(ctx context.Context, r *api.ExecProcessRequest) (*api.ExecProcessResponse, error) {
+func (s *Service) Exec(ctx context.Context, r *api.ExecProcessRequest) (*google_protobuf.Empty, error) {
 	if r.ExecID == "" {
 		return nil, grpc.Errorf(codes.InvalidArgument, "exec id cannot be empty")
 	}
@@ -326,7 +342,7 @@ func (s *Service) Exec(ctx context.Context, r *api.ExecProcessRequest) (*api.Exe
 	if err != nil {
 		return nil, err
 	}
-	process, err := t.Exec(ctx, r.ExecID, runtime.ExecOpts{
+	if _, err := t.Exec(ctx, r.ExecID, runtime.ExecOpts{
 		Spec: r.Spec,
 		IO: runtime.IO{
 			Stdin:    r.Stdin,
@@ -334,17 +350,10 @@ func (s *Service) Exec(ctx context.Context, r *api.ExecProcessRequest) (*api.Exe
 			Stderr:   r.Stderr,
 			Terminal: r.Terminal,
 		},
-	})
-	if err != nil {
+	}); err != nil {
 		return nil, err
 	}
-	state, err := process.State(ctx)
-	if err != nil {
-		return nil, err
-	}
-	return &api.ExecProcessResponse{
-		Pid: state.Pid,
-	}, nil
+	return empty, nil
 }
 
 func (s *Service) ResizePty(ctx context.Context, r *api.ResizePtyRequest) (*google_protobuf.Empty, error) {
@@ -501,13 +510,4 @@ func (s *Service) getRuntime(name string) (runtime.Runtime, error) {
 		return nil, grpc.Errorf(codes.NotFound, "unknown runtime %q", name)
 	}
 	return runtime, nil
-}
-
-func (s *Service) emit(ctx context.Context, topic string, evt interface{}) error {
-	emitterCtx := events.WithTopic(ctx, topic)
-	if err := s.emitter.Post(emitterCtx, evt); err != nil {
-		return err
-	}
-
-	return nil
 }

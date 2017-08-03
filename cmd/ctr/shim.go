@@ -17,7 +17,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/grpclog"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/containerd/console"
 	shim "github.com/containerd/containerd/linux/shim/v1"
 	"github.com/containerd/containerd/typeurl"
@@ -25,6 +24,7 @@ import (
 	google_protobuf "github.com/golang/protobuf/ptypes/empty"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
@@ -149,7 +149,9 @@ var shimStartCommand = cli.Command{
 		if err != nil {
 			return err
 		}
-		_, err = service.Start(gocontext.Background(), empty)
+		_, err = service.Start(gocontext.Background(), &shim.StartRequest{
+			ID: context.Args().First(),
+		})
 		return err
 	},
 }
@@ -261,7 +263,12 @@ var shimExecCommand = cli.Command{
 			Stderr:   context.String("stderr"),
 			Terminal: tty,
 		}
-		r, err := service.Exec(ctx, rq)
+		if _, err := service.Exec(ctx, rq); err != nil {
+			return err
+		}
+		r, err := service.Start(ctx, &shim.StartRequest{
+			ID: id,
+		})
 		if err != nil {
 			return err
 		}

@@ -5,8 +5,6 @@ package shim
 import (
 	"path/filepath"
 
-	events "github.com/containerd/containerd/api/services/events/v1"
-	evt "github.com/containerd/containerd/events"
 	shimapi "github.com/containerd/containerd/linux/shim/v1"
 	google_protobuf "github.com/golang/protobuf/ptypes/empty"
 	"golang.org/x/net/context"
@@ -29,7 +27,7 @@ func (c *local) Create(ctx context.Context, in *shimapi.CreateTaskRequest, opts 
 	return c.s.Create(ctx, in)
 }
 
-func (c *local) Start(ctx context.Context, in *google_protobuf.Empty, opts ...grpc.CallOption) (*google_protobuf.Empty, error) {
+func (c *local) Start(ctx context.Context, in *shimapi.StartRequest, opts ...grpc.CallOption) (*shimapi.StartResponse, error) {
 	return c.s.Start(ctx, in)
 }
 
@@ -45,7 +43,7 @@ func (c *local) DeleteProcess(ctx context.Context, in *shimapi.DeleteProcessRequ
 	return c.s.DeleteProcess(ctx, in)
 }
 
-func (c *local) Exec(ctx context.Context, in *shimapi.ExecProcessRequest, opts ...grpc.CallOption) (*shimapi.ExecProcessResponse, error) {
+func (c *local) Exec(ctx context.Context, in *shimapi.ExecProcessRequest, opts ...grpc.CallOption) (*google_protobuf.Empty, error) {
 	return c.s.Exec(ctx, in)
 }
 
@@ -87,20 +85,4 @@ func (c *local) ShimInfo(ctx context.Context, in *google_protobuf.Empty, opts ..
 
 func (c *local) Update(ctx context.Context, in *shimapi.UpdateTaskRequest, opts ...grpc.CallOption) (*google_protobuf.Empty, error) {
 	return c.s.Update(ctx, in)
-}
-
-type poster interface {
-	Post(ctx context.Context, in *events.PostEventRequest, opts ...grpc.CallOption) (*google_protobuf.Empty, error)
-}
-
-type localEventsClient struct {
-	emitter evt.Poster
-}
-
-func (l *localEventsClient) Post(ctx context.Context, r *events.PostEventRequest, opts ...grpc.CallOption) (*google_protobuf.Empty, error) {
-	ctx = evt.WithTopic(ctx, r.Envelope.Topic)
-	if err := l.emitter.Post(ctx, r.Envelope); err != nil {
-		return nil, err
-	}
-	return empty, nil
 }

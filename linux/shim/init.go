@@ -39,20 +39,24 @@ type initProcess struct {
 	// the reaper interface.
 	mu sync.Mutex
 
-	id      string
-	bundle  string
-	console console.Console
-	io      runc.IO
-	runtime *runc.Runc
-	status  int
-	exited  time.Time
-	pid     int
-	closers []io.Closer
-	stdin   io.Closer
-	stdio   stdio
+	id       string
+	bundle   string
+	console  console.Console
+	platform platform
+	io       runc.IO
+	runtime  *runc.Runc
+	status   int
+	exited   time.Time
+	pid      int
+	closers  []io.Closer
+	stdin    io.Closer
+	stdio    stdio
+	rootfs   string
 }
 
-func newInitProcess(context context.Context, path, namespace string, r *shimapi.CreateTaskRequest) (*initProcess, error) {
+func newInitProcess(context context.Context, plat platform, path, namespace string, r *shimapi.CreateTaskRequest) (*initProcess, error) {
+	var success bool
+
 	if err := identifiers.Validate(r.ID); err != nil {
 		return nil, errors.Wrapf(err, "invalid task id")
 	}
@@ -64,13 +68,26 @@ func newInitProcess(context context.Context, path, namespace string, r *shimapi.
 		}
 		options = *v.(*runcopts.CreateOptions)
 	}
+
+	rootfs := filepath.Join(path, "rootfs")
+	// count the number of successful mounts so we can undo
+	// what was actually done rather than what should have been
+	// done.
+	defer func() {
+		if success {
+			return
+		}
+		if err2 := mount.UnmountAll(rootfs, 0); err2 != nil {
+			log.G(context).WithError(err2).Warn("Failed to cleanup rootfs mount")
+		}
+	}()
 	for _, rm := range r.Rootfs {
 		m := &mount.Mount{
 			Type:    rm.Type,
 			Source:  rm.Source,
 			Options: rm.Options,
 		}
-		if err := m.Mount(filepath.Join(path, "rootfs")); err != nil {
+		if err := m.Mount(rootfs); err != nil {
 			return nil, errors.Wrapf(err, "failed to mount rootfs component %v", m)
 		}
 	}
@@ -82,15 +99,17 @@ func newInitProcess(context context.Context, path, namespace string, r *shimapi.
 		Root:         filepath.Join(RuncRoot, namespace),
 	}
 	p := &initProcess{
-		id:      r.ID,
-		bundle:  r.Bundle,
-		runtime: runtime,
+		id:       r.ID,
+		bundle:   r.Bundle,
+		runtime:  runtime,
+		platform: plat,
 		stdio: stdio{
 			stdin:    r.Stdin,
 			stdout:   r.Stdout,
 			stderr:   r.Stderr,
 			terminal: r.Terminal,
 		},
+		rootfs: rootfs,
 	}
 	var (
 		err    error
@@ -103,7 +122,6 @@ func newInitProcess(context context.Context, path, namespace string, r *shimapi.
 		}
 		defer os.Remove(socket.Path())
 	} else {
-		// TODO: get uid/gid
 		if io, err = runc.NewPipeIO(0, 0); err != nil {
 			return nil, errors.Wrap(err, "failed to create OCI runtime io pipes")
 		}
@@ -154,10 +172,11 @@ func newInitProcess(context context.Context, path, namespace string, r *shimapi.
 		if err != nil {
 			return nil, errors.Wrap(err, "failed to retrieve console master")
 		}
-		p.console = console
-		if err := copyConsole(context, console, r.Stdin, r.Stdout, r.Stderr, &p.WaitGroup, &copyWaitGroup); err != nil {
+		console, err = plat.copyConsole(context, console, r.Stdin, r.Stdout, r.Stderr, &p.WaitGroup, &copyWaitGroup)
+		if err != nil {
 			return nil, errors.Wrap(err, "failed to start console copy")
 		}
+		p.console = console
 	} else {
 		if err := copyPipes(context, io, r.Stdin, r.Stdout, r.Stderr, &p.WaitGroup, &copyWaitGroup); err != nil {
 			return nil, errors.Wrap(err, "failed to start io pipe copy")
@@ -170,6 +189,7 @@ func newInitProcess(context context.Context, path, namespace string, r *shimapi.
 		return nil, errors.Wrap(err, "failed to retrieve OCI runtime container pid")
 	}
 	p.pid = pid
+	success = true
 	return p, nil
 }
 
@@ -181,7 +201,7 @@ func (p *initProcess) Pid() int {
 	return p.pid
 }
 
-func (p *initProcess) Status() int {
+func (p *initProcess) ExitStatus() int {
 	return p.status
 }
 
@@ -189,8 +209,8 @@ func (p *initProcess) ExitedAt() time.Time {
 	return p.exited
 }
 
-// ContainerStatus return the state of the container (created, running, paused, stopped)
-func (p *initProcess) ContainerStatus(ctx context.Context) (string, error) {
+// Status return the state of the container (created, running, paused, stopped)
+func (p *initProcess) Status(ctx context.Context) (string, error) {
 	c, err := p.runtime.State(ctx, p.id)
 	if err != nil {
 		return "", p.runtimeError(err, "OCI runtime state failed")
@@ -205,15 +225,16 @@ func (p *initProcess) Start(context context.Context) error {
 	return p.runtimeError(err, "OCI runtime start failed")
 }
 
-func (p *initProcess) Exited(status int) {
+func (p *initProcess) SetExited(status int) {
 	p.mu.Lock()
 	p.status = status
 	p.exited = time.Now()
+	p.platform.shutdownConsole(context.Background(), p.console)
 	p.mu.Unlock()
 }
 
 func (p *initProcess) Delete(context context.Context) error {
-	status, err := p.ContainerStatus(context)
+	status, err := p.Status(context)
 	if err != nil {
 		return err
 	}
@@ -229,7 +250,16 @@ func (p *initProcess) Delete(context context.Context) error {
 		}
 		p.io.Close()
 	}
-	return p.runtimeError(err, "OCI runtime delete failed")
+	err = p.runtimeError(err, "OCI runtime delete failed")
+
+	if err2 := mount.UnmountAll(p.rootfs, 0); err2 != nil {
+		log.G(context).WithError(err2).Warn("Failed to cleanup rootfs mount")
+		if err == nil {
+			err = errors.Wrap(err2, "Failed rootfs umount")
+		}
+	}
+
+	return err
 }
 
 func (p *initProcess) Resize(ws console.WinSize) error {

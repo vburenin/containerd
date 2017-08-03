@@ -3,18 +3,10 @@ package content
 import (
 	"context"
 	"io"
-	"sync"
 	"time"
 
+	"github.com/containerd/containerd/oci"
 	"github.com/opencontainers/go-digest"
-)
-
-var (
-	bufPool = sync.Pool{
-		New: func() interface{} {
-			return make([]byte, 1<<20)
-		},
-	}
 )
 
 type Provider interface {
@@ -86,10 +78,8 @@ type IngestManager interface {
 }
 
 type Writer interface {
-	io.WriteCloser
+	oci.BlobWriter
 	Status() (Status, error)
-	Digest() digest.Digest
-	Commit(size int64, expected digest.Digest) error
 	Truncate(size int64) error
 }
 

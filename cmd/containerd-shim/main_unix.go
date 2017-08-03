@@ -3,22 +3,27 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
 	"runtime"
 	"strings"
+	"time"
 
-	"golang.org/x/sys/unix"
-
-	"google.golang.org/grpc"
-
-	"github.com/Sirupsen/logrus"
+	eventsapi "github.com/containerd/containerd/api/services/events/v1"
+	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/linux/shim"
 	shimapi "github.com/containerd/containerd/linux/shim/v1"
 	"github.com/containerd/containerd/reaper"
+	"github.com/containerd/containerd/typeurl"
 	"github.com/containerd/containerd/version"
+	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
+	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
 )
 
 const usage = `
@@ -67,18 +72,19 @@ func main() {
 		if err != nil {
 			return err
 		}
-		if err := setupRoot(); err != nil {
-			return err
-		}
 		path, err := os.Getwd()
 		if err != nil {
 			return err
 		}
 		server := grpc.NewServer()
+		e, err := connectEvents(context.GlobalString("address"))
+		if err != nil {
+			return err
+		}
 		sv, err := shim.NewService(
 			path,
 			context.GlobalString("namespace"),
-			context.GlobalString("address"),
+			&remoteEventsPublisher{client: e},
 		)
 		if err != nil {
 			return err
@@ -157,4 +163,54 @@ func dumpStacks() {
 	}
 	buf = buf[:stackSize]
 	logrus.Infof("=== BEGIN goroutine stack dump ===\n%s\n=== END goroutine stack dump ===", buf)
+}
+
+func connectEvents(address string) (eventsapi.EventsClient, error) {
+	conn, err := connect(address, dialer)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to dial %q", address)
+	}
+	return eventsapi.NewEventsClient(conn), nil
+}
+
+func connect(address string, d func(string, time.Duration) (net.Conn, error)) (*grpc.ClientConn, error) {
+	gopts := []grpc.DialOption{
+		grpc.WithBlock(),
+		grpc.WithInsecure(),
+		grpc.WithTimeout(100 * time.Second),
+		grpc.WithDialer(d),
+		grpc.FailOnNonTempDialError(true),
+	}
+	conn, err := grpc.Dial(dialAddress(address), gopts...)
+	if err != nil {
+		return nil, errors.Wrapf(err, "failed to dial %q", address)
+	}
+	return conn, nil
+}
+
+func dialer(address string, timeout time.Duration) (net.Conn, error) {
+	address = strings.TrimPrefix(address, "unix://")
+	return net.DialTimeout("unix", address, timeout)
+}
+
+func dialAddress(address string) string {
+	return fmt.Sprintf("unix://%s", address)
+}
+
+type remoteEventsPublisher struct {
+	client eventsapi.EventsClient
+}
+
+func (l *remoteEventsPublisher) Publish(ctx context.Context, topic string, event events.Event) error {
+	encoded, err := typeurl.MarshalAny(event)
+	if err != nil {
+		return err
+	}
+	if _, err := l.client.Publish(ctx, &eventsapi.PublishRequest{
+		Topic: topic,
+		Event: encoded,
+	}); err != nil {
+		return errdefs.FromGRPC(err)
+	}
+	return nil
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/containerd/containerd/errdefs"
 	"github.com/gogo/protobuf/proto"
 	"github.com/gogo/protobuf/types"
+	"github.com/pkg/errors"
 )
 
 const Prefix = "types.containerd.io"
@@ -21,13 +22,19 @@ var (
 
 // Register a type with the base url of the type
 func Register(v interface{}, args ...string) {
-	t := tryDereference(v)
+	var (
+		t = tryDereference(v)
+		p = path.Join(append([]string{Prefix}, args...)...)
+	)
 	mu.Lock()
 	defer mu.Unlock()
-	if _, ok := registry[t]; ok {
-		panic(errdefs.ErrAlreadyExists)
+	if et, ok := registry[t]; ok {
+		if et != p {
+			panic(errors.Errorf("type registred with alternate path %q != %q", et, p))
+		}
+		return
 	}
-	registry[t] = path.Join(append([]string{Prefix}, args...)...)
+	registry[t] = p
 }
 
 // TypeURL returns the type url for a registred type
@@ -39,7 +46,7 @@ func TypeURL(v interface{}) (string, error) {
 		// fallback to the proto registry if it is a proto message
 		pb, ok := v.(proto.Message)
 		if !ok {
-			return "", errdefs.ErrNotFound
+			return "", errors.Wrapf(errdefs.ErrNotFound, "type %s", reflect.TypeOf(v))
 		}
 		return path.Join(Prefix, proto.MessageName(pb)), nil
 	}
@@ -59,17 +66,25 @@ func Is(any *types.Any, v interface{}) bool {
 
 // MarshalAny marshals the value v into an any with the correct TypeUrl
 func MarshalAny(v interface{}) (*types.Any, error) {
-	var data []byte
+	var marshal func(v interface{}) ([]byte, error)
+	switch t := v.(type) {
+	case *types.Any:
+		// avoid reserializing the type if we have an any.
+		return t, nil
+	case proto.Message:
+		marshal = func(v interface{}) ([]byte, error) {
+			return proto.Marshal(t)
+		}
+	default:
+		marshal = json.Marshal
+	}
+
 	url, err := TypeURL(v)
 	if err != nil {
 		return nil, err
 	}
-	switch t := v.(type) {
-	case proto.Message:
-		data, err = proto.Marshal(t)
-	default:
-		data, err = json.Marshal(v)
-	}
+
+	data, err := marshal(v)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +131,7 @@ func getTypeByUrl(url string) (urlType, error) {
 			isProto: true,
 		}, nil
 	}
-	return urlType{}, errdefs.ErrNotFound
+	return urlType{}, errors.Wrapf(errdefs.ErrNotFound, "type with url %s", url)
 }
 
 func tryDereference(v interface{}) reflect.Type {

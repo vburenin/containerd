@@ -19,7 +19,7 @@ import (
 	snapshot "github.com/containerd/containerd/api/services/snapshot/v1"
 	tasks "github.com/containerd/containerd/api/services/tasks/v1"
 	version "github.com/containerd/containerd/api/services/version/v1"
-	store "github.com/containerd/containerd/content"
+	"github.com/containerd/containerd/content/local"
 	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plugin"
@@ -36,7 +36,7 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 	if config.Root == "" {
 		return nil, errors.New("root must be specified")
 	}
-	if err := os.MkdirAll(config.Root, 0700); err != nil {
+	if err := os.MkdirAll(config.Root, 0711); err != nil {
 		return nil, err
 	}
 	if err := apply(ctx, config); err != nil {
@@ -53,8 +53,8 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 	var (
 		services []plugin.Service
 		s        = &Server{
-			rpc:     rpc,
-			emitter: events.NewEmitter(),
+			rpc:    rpc,
+			events: events.NewExchange(),
 		}
 		initialized = make(map[plugin.PluginType]map[string]interface{})
 	)
@@ -63,12 +63,12 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 		log.G(ctx).WithField("type", p.Type).Infof("loading plugin %q...", id)
 
 		initContext := plugin.NewContext(
-			events.WithPoster(ctx, s.emitter),
+			ctx,
 			initialized,
 			config.Root,
 			id,
 		)
-		initContext.Emitter = s.emitter
+		initContext.Events = s.events
 		initContext.Address = config.GRPC.Address
 
 		// load the plugin specific configuration if it is provided
@@ -112,8 +112,8 @@ func New(ctx context.Context, config *Config) (*Server, error) {
 
 // Server is the containerd main daemon
 type Server struct {
-	rpc     *grpc.Server
-	emitter *events.Emitter
+	rpc    *grpc.Server
+	events *events.Exchange
 }
 
 // ServeGRPC provides the containerd grpc APIs on the provided listener
@@ -161,14 +161,14 @@ func loadPlugins(config *Config) ([]*plugin.Registration, error) {
 		Type: plugin.ContentPlugin,
 		ID:   "content",
 		Init: func(ic *plugin.InitContext) (interface{}, error) {
-			return store.NewStore(ic.Root)
+			return local.NewStore(ic.Root)
 		},
 	})
 	plugin.Register(&plugin.Registration{
 		Type: plugin.MetadataPlugin,
 		ID:   "bolt",
 		Init: func(ic *plugin.InitContext) (interface{}, error) {
-			if err := os.MkdirAll(ic.Root, 0700); err != nil {
+			if err := os.MkdirAll(ic.Root, 0711); err != nil {
 				return nil, err
 			}
 			return bolt.Open(filepath.Join(ic.Root, "meta.db"), 0644, nil)

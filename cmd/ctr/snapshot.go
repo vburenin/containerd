@@ -7,12 +7,12 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/containerd/containerd/progress"
 	"github.com/containerd/containerd/rootfs"
 	"github.com/containerd/containerd/snapshot"
 	digest "github.com/opencontainers/go-digest"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
 )
 
@@ -28,6 +28,7 @@ var snapshotCommand = cli.Command{
 		prepareSnapshotCommand,
 		treeSnapshotCommand,
 		mountSnapshotCommand,
+		commitSnapshotCommand,
 	},
 }
 
@@ -88,10 +89,13 @@ var listSnapshotCommand = cli.Command{
 		}
 
 		tw := tabwriter.NewWriter(os.Stdout, 1, 8, 1, ' ', 0)
-		fmt.Fprintln(tw, "ID\tParent\tState\tReadonly\t")
+		fmt.Fprintln(tw, "ID\tPARENT\tKIND\t")
 
 		if err := snapshotter.Walk(ctx, func(ctx context.Context, info snapshot.Info) error {
-			fmt.Fprintf(tw, "%v\t%v\t%v\t%t\t\n", info.Name, info.Parent, state(info.Kind), info.Readonly)
+			fmt.Fprintf(tw, "%v\t%v\t%v\t\n",
+				info.Name,
+				info.Parent,
+				info.Kind)
 			return nil
 		}); err != nil {
 			return err
@@ -99,17 +103,6 @@ var listSnapshotCommand = cli.Command{
 
 		return tw.Flush()
 	},
-}
-
-func state(k snapshot.Kind) string {
-	switch k {
-	case snapshot.KindActive:
-		return "active"
-	case snapshot.KindCommitted:
-		return "committed"
-	default:
-		return ""
-	}
 }
 
 var usageSnapshotCommand = cli.Command{
@@ -287,6 +280,30 @@ var mountSnapshotCommand = cli.Command{
 		}
 
 		return nil
+	},
+}
+
+var commitSnapshotCommand = cli.Command{
+	Name:      "commit",
+	Usage:     "commit creates a new snapshot with diff from parent snapshot",
+	ArgsUsage: "[flags] <id> <target>",
+	Action: func(clicontext *cli.Context) error {
+		ctx, cancel := appContext(clicontext)
+		defer cancel()
+
+		if clicontext.NArg() != 2 {
+			return cli.ShowSubcommandHelp(clicontext)
+		}
+
+		id := clicontext.Args().Get(0)
+		target := clicontext.Args().Get(1)
+
+		snapshotter, err := getSnapshotter(clicontext)
+		if err != nil {
+			return err
+		}
+
+		return snapshotter.Commit(ctx, target, id)
 	},
 }
 

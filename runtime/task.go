@@ -23,6 +23,8 @@ type Process interface {
 	ResizePty(context.Context, ConsoleSize) error
 	// CloseStdin closes the processes stdin
 	CloseIO(context.Context) error
+	// Start the container's user defined process
+	Start(context.Context) error
 }
 
 type Task interface {
@@ -30,8 +32,6 @@ type Task interface {
 
 	// Information of the container
 	Info() TaskInfo
-	// Start the container's user defined process
-	Start(context.Context) error
 	// Pause pauses the container process
 	Pause(context.Context) error
 	// Resume unpauses the container process
@@ -42,7 +42,7 @@ type Task interface {
 	Pids(context.Context) ([]uint32, error)
 	// Checkpoint checkpoints a container to an image with live system data
 	Checkpoint(context.Context, string, *types.Any) error
-	// DeleteProcess deletes a specific exec process via the pid
+	// DeleteProcess deletes a specific exec process via its id
 	DeleteProcess(context.Context, string) (*Exit, error)
 	// Update sets the provided resources to a running task
 	Update(context.Context, *types.Any) error
