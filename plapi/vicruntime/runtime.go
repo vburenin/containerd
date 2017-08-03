@@ -270,7 +270,7 @@ func (r *Runtime) startEventProcessor(ctx context.Context) {
 				return
 			}
 
-			topic := "/task/" + getTopic(e)
+			topic := getTopic(e)
 			ctx = ctdevents.WithTopic(ctx, topic)
 			err = r.emitter.Post(ctx, &events.Envelope{
 				Timestamp: time.Now(),
@@ -286,26 +286,27 @@ func (r *Runtime) startEventProcessor(ctx context.Context) {
 	}()
 }
 
+
 func getTopic(e interface{}) string {
 	switch e.(type) {
 	case *events.TaskCreate:
-		return "task-create"
+		return runtime.TaskCreateEventTopic
 	case *events.TaskStart:
-		return "task-start"
+		return runtime.TaskStartEventTopic
 	case *events.TaskOOM:
-		return "task-oom"
+		return runtime.TaskOOMEventTopic
 	case *events.TaskExit:
-		return "task-exit"
+		return runtime.TaskExitEventTopic
 	case *events.TaskDelete:
-		return "task-delete"
+		return runtime.TaskDeleteEventTopic
 	case *events.TaskExecAdded:
-		return "task-exec-added"
+		return runtime.TaskExecAddedEventTopic
 	case *events.TaskPaused:
-		return "task-paused"
+		return runtime.TaskPausedEventTopic
 	case *events.TaskResumed:
-		return "task-resumed"
+		return runtime.TaskResumedEventTopic
 	case *events.TaskCheckpointed:
-		return "task-checkpointed"
+		return runtime.TaskCheckpointedEventTopic
 	}
 	return "?"
 }
