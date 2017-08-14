@@ -7,9 +7,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/containerd/containerd/api/services/events/v1"
+	eventsapi "github.com/containerd/containerd/api/services/events/v1"
 	containerd_types "github.com/containerd/containerd/api/types"
 	"github.com/containerd/containerd/errdefs"
+	"github.com/containerd/containerd/events"
 	"github.com/containerd/containerd/log"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/containers"
@@ -46,6 +47,7 @@ const (
 	AnnotationStorageName   = "containerd.storage_name"
 	AnnotationContainerdID  = "containerd.id"
 	AnnotationContainerSpec = "containerd.spec"
+	AnnotationNamespace     = "containerd.namespace"
 )
 
 func loadSpec(specBin []byte) (*specs.Spec, error) {
@@ -77,30 +79,32 @@ type VicTasker struct {
 	mu      sync.Mutex
 	main    *VicTask
 	other   map[string]*VicTask
-	events  chan interface{}
+	events  events.Publisher
 	pl      *client.PortLayer
 	spec    *specs.Spec
 	binSpec []byte
 
-	id      string
-	vid     string
-	root    string
-	storage string
-	imageID string
+	id        string
+	vid       string
+	root      string
+	storage   string
+	imageID   string
+	namespace string
 }
 
 func NewVicTasker(ctx context.Context, pl *client.PortLayer,
-	events chan interface{},
-	storage, root, id string) *VicTasker {
+	events events.Publisher,
+	namespace, storage, root, id string) *VicTasker {
 
 	return &VicTasker{
-		main:    nil,
-		other:   make(map[string]*VicTask),
-		events:  events,
-		id:      id,
-		storage: storage,
-		root:    root,
-		pl:      pl,
+		main:      nil,
+		other:     make(map[string]*VicTask),
+		events:    events,
+		id:        id,
+		storage:   storage,
+		namespace: namespace,
+		root:      root,
+		pl:        pl,
 	}
 }
 
@@ -151,6 +155,7 @@ func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error 
 			AnnotationStorageName:   vt.storage,
 			AnnotationContainerdID:  vt.id,
 			AnnotationContainerSpec: string(opts.Spec.Value),
+			AnnotationNamespace:     vt.namespace,
 		},
 
 		// Layer
@@ -238,11 +243,11 @@ func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error 
 		})
 	}
 
-	vt.events <- &events.TaskCreate{
+	e := &eventsapi.TaskCreate{
 		ContainerID: vt.id,
 		Bundle:      vt.root,
 		Rootfs:      runtimeMounts,
-		IO: &events.TaskIO{
+		IO: &eventsapi.TaskIO{
 			Stdin:    opts.IO.Stdin,
 			Stdout:   opts.IO.Stdout,
 			Stderr:   opts.IO.Stderr,
@@ -251,6 +256,8 @@ func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error 
 		Checkpoint: opts.Checkpoint,
 		Pid:        1,
 	}
+
+	vt.events.Publish(ctx, getTopic(e), e)
 
 	vicProc := NewVicProc(vt.pl, vt.id, vt.vid, vt.root, opts)
 	vt.main = vicProc
@@ -261,7 +268,9 @@ func (vt *VicTasker) Create(ctx context.Context, opts runtime.CreateOpts) error 
 func (vt *VicTasker) Restore(ctx context.Context, ci *models.ContainerInfo) error {
 	cfg := ci.ContainerConfig
 	vt.storage = cfg.Annotations[AnnotationStorageName]
+
 	vt.imageID = cfg.Annotations[AnnotationImageID]
+	vt.namespace = cfg.Annotations[AnnotationNamespace]
 	vt.vid = cfg.ContainerID
 
 	vt.main = &VicTask{
@@ -283,7 +292,7 @@ func (vt *VicTasker) Info() runtime.TaskInfo {
 		ID:        vt.id,
 		Runtime:   pluginID,
 		Spec:      vt.binSpec,
-		Namespace: "default",
+		Namespace: vt.namespace,
 	}
 }
 
@@ -325,10 +334,10 @@ func (vt *VicTasker) Start(ctx context.Context) error {
 		log.G(ctx).Errorf("Failed to start container IO")
 	}
 
-	vt.events <- &events.TaskStart{
+	publishEvent(ctx, vt.events, &eventsapi.TaskStart{
 		Pid:         1,
 		ContainerID: vt.id,
-	}
+	})
 	return nil
 }
 

@@ -91,10 +91,9 @@ func (vs *VicSnap) loadAvailableImages(ctx context.Context) error {
 			kind = snapshot.KindCommitted
 		}
 		si := snapshot.Info{
-			Parent:   img.Metadata["parent"],
-			Name:     img.Metadata["orig_name"],
-			Readonly: false,
-			Kind:     kind,
+			Parent: img.Metadata["parent"],
+			Name:   img.Metadata["orig_name"],
+			Kind:   kind,
 		}
 		if si.Name == "" {
 			si.Name = img.ID
@@ -161,10 +160,9 @@ func (vs *VicSnap) addActive(snapType, key, parent string) []mount.Mount {
 	parentID := mounts.HashParent(parent)
 
 	vs.snapshots[keyID] = snapshot.Info{
-		Name:     key,
-		Parent:   parentID,
-		Kind:     snapshot.KindActive,
-		Readonly: snapType == "view",
+		Name:   key,
+		Parent: parentID,
+		Kind:   snapshot.KindActive,
 	}
 
 	mountList := []mount.Mount{m}
@@ -231,10 +229,9 @@ func (vs *VicSnap) Commit(ctx context.Context, name, key string) error {
 	_, err := vs.plClient.Storage.CommitImage(params)
 	if err == nil {
 		vs.snapshots[nameID] = snapshot.Info{
-			Name:     name,
-			Parent:   s.Parent,
-			Kind:     snapshot.KindCommitted,
-			Readonly: true,
+			Name:   name,
+			Parent: s.Parent,
+			Kind:   snapshot.KindCommitted,
 		}
 	}
 	return err

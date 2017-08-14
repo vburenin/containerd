@@ -4,7 +4,6 @@ import (
 	"io"
 	"io/ioutil"
 
-	"github.com/Sirupsen/logrus"
 	"github.com/boltdb/bolt"
 	"github.com/containerd/containerd/archive/compression"
 	"github.com/containerd/containerd/content"
@@ -124,7 +123,7 @@ func (vd *VicDiffer) Apply(ctx context.Context, desc ocispec.Descriptor, mnts []
 		Size:      rc.c,
 	}
 
-	logrus.Infof("Returning response: %q", resp.Digest)
+	log.G(ctx).Infof("Returning response: %q", resp.Digest)
 
 	return resp, nil
 }

@@ -9,11 +9,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Sirupsen/logrus"
-	events "github.com/containerd/containerd/api/services/events/v1"
+	eventsapi "github.com/containerd/containerd/api/services/events/v1"
 	ctdevents "github.com/containerd/containerd/events"
-
 	"github.com/containerd/containerd/log"
+	"github.com/containerd/containerd/namespaces"
 	"github.com/containerd/containerd/plapi/client"
 	"github.com/containerd/containerd/plapi/client/containers"
 	plevents "github.com/containerd/containerd/plapi/client/events"
@@ -21,7 +20,6 @@ import (
 	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/runtime"
-	"github.com/containerd/containerd/typeurl"
 	"github.com/go-openapi/swag"
 	"github.com/pkg/errors"
 )
@@ -36,6 +34,11 @@ var (
 	ErrTaskAlreadyExists = errors.New("task already exists")
 	pluginID             = fmt.Sprintf("%s.%s", plugin.RuntimePlugin, runtimeName)
 )
+
+type contextEvent struct {
+	ctx   context.Context
+	event interface{}
+}
 
 func init() {
 	plugin.Register(&plugin.Registration{
@@ -53,20 +56,28 @@ type Runtime struct {
 	root string
 	mu   sync.Mutex
 
-	events    chan interface{}
-	monEvents chan interface{}
+	eventChan chan *contextEvent
 
-	emitter ctdevents.Poster
+	events *ctdevents.Exchange
 
 	pl            *client.PortLayer
 	eventsContext context.Context
 	eventsCancel  func()
-	tasks         map[string]runtime.Task
-	refMap        map[string]string
+	tasks         *runtime.TaskList
 	monitor       runtime.TaskMonitor
+
+	// refMap is needed to keep pointers between PortLayer ID
+	// and containerd ID to adopt messages from PortLayer which
+	// container Portlayer ID.
+	refMap map[string]VicRef
 }
 
 var _ runtime.Runtime = &Runtime{}
+
+type VicRef struct {
+	ID        string
+	Namespace string
+}
 
 func New(ic *plugin.InitContext) (interface{}, error) {
 	if err := os.MkdirAll(ic.Root, 0700); err != nil {
@@ -79,20 +90,18 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 	}
 
 	cfg := ic.Config.(*vicconfig.Config)
-	logrus.Infof("Vic runtime config: %q", cfg)
+	log.G(ic.Context).Infof("Vic runtime config: %q", cfg)
 
 	c, cancel := context.WithCancel(ic.Context)
 	r := &Runtime{
 		root:          ic.Root,
-		events:        make(chan interface{}, 4096),
-		monEvents:     make(chan interface{}, 4096),
-		emitter:       ctdevents.GetPoster(ic.Context),
+		events:        ic.Events,
 		eventsContext: c,
 		eventsCancel:  cancel,
 		pl:            PortLayerClient(cfg.PortlayerAddress),
 		monitor:       monitor.(runtime.TaskMonitor),
-		tasks:         make(map[string]runtime.Task),
-		refMap:        make(map[string]string),
+		tasks:         runtime.NewTaskList(),
+		refMap:        make(map[string]VicRef),
 	}
 
 	if err := r.updateContainerList(ic.Context); err != nil {
@@ -105,7 +114,7 @@ func New(ic *plugin.InitContext) (interface{}, error) {
 }
 
 func (r *Runtime) updateContainerList(ctx context.Context) error {
-	logrus.Debugf("Refreshing running tasks list")
+	log.G(ctx).Debugf("Refreshing running tasks list")
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -116,18 +125,25 @@ func (r *Runtime) updateContainerList(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	logrus.Debugf("Discovered %d tasks", len(cl.Payload))
+	log.G(ctx).Debugf("Discovered %d tasks", len(cl.Payload))
 
 	for _, c := range cl.Payload {
 		tid := c.ContainerConfig.Annotations[AnnotationContainerdID]
-		refId := c.ContainerConfig.ContainerID
-		vt := NewVicTasker(ctx, r.pl, r.events, storeName, r.root, tid)
+		namespace := c.ContainerConfig.Annotations[AnnotationNamespace]
+		if namespace == "" {
+			namespace = "default"
+		}
+		vt := NewVicTasker(
+			ctx, r.pl, r.events, namespace,
+			storeName, r.root, tid)
 		if err := vt.Restore(ctx, c); err != nil {
 			log.G(ctx).Errorf("Failed to restore container %s, due to: %s", tid, err)
 			continue
 		}
-		r.tasks[tid] = vt
-		r.refMap[refId] = tid
+		if err := r.tasks.AddWithNamespace(namespace, vt); err != nil {
+			log.G(ctx).WithError(err).Errorf("Could not add task")
+		}
+		r.refMap[vt.vid] = VicRef{ID: vt.id, Namespace: namespace}
 	}
 	return nil
 }
@@ -139,31 +155,37 @@ func (r *Runtime) ID() string {
 func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts) (runtime.Task, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	namespace, err := namespaces.NamespaceRequired(ctx)
 
-	if _, ok := r.tasks[id]; ok {
-		return nil, ErrTaskAlreadyExists
-	}
-
-	logrus.Debugf("Starting runtime for %s. Options: %q", id, opts)
+	log.G(ctx).Debugf("Starting runtime for %s. Options: %q", id, opts)
 	path, err := r.newBundle(id, opts.Spec.Value)
 	if err != nil {
 		return nil, err
 	}
 
+	if _, err := r.tasks.Get(ctx, id); err == nil {
+		return nil, runtime.ErrTaskAlreadyExists
+	} else if err != runtime.ErrTaskNotExists {
+		return nil, err
+	}
+
 	s := NewVicTasker(ctx, r.pl,
-		r.events, "containerd-storage", path, id)
+		r.events, namespace, "containerd-storage", path, id)
 
 	if err := s.Create(ctx, opts); err != nil {
 		os.RemoveAll(path)
 		return nil, err
 	}
 
-	if err = r.monitor.Monitor(s); err != nil {
+	if err := r.tasks.Add(ctx, s); err != nil {
 		return nil, err
 	}
 
-	r.tasks[id] = s
-	r.refMap[s.vid] = s.id
+	r.refMap[s.vid] = VicRef{ID: s.id, Namespace: namespace}
+
+	if err = r.monitor.Monitor(s); err != nil {
+		return nil, err
+	}
 
 	return s, err
 }
@@ -171,22 +193,13 @@ func (r *Runtime) Create(ctx context.Context, id string, opts runtime.CreateOpts
 func (r *Runtime) Get(ctx context.Context, id string) (runtime.Task, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	t, ok := r.tasks[id]
-	if !ok {
-		return nil, ErrTaskNotExists
-	}
-	return t, nil
+	return r.tasks.Get(ctx, id)
 }
 
 func (r *Runtime) Tasks(ctx context.Context) ([]runtime.Task, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
-	o := make([]runtime.Task, 0, len(r.tasks))
-	for _, t := range r.tasks {
-		o = append(o, t)
-	}
-	return o, nil
+	return r.tasks.GetAll(ctx)
 }
 
 func (r *Runtime) Delete(ctx context.Context, c runtime.Task) (*runtime.Exit, error) {
@@ -208,38 +221,36 @@ func (r *Runtime) deleteBundle(id string) error {
 	return os.RemoveAll(filepath.Join(r.root, id))
 }
 
-func (r *Runtime) emit(ctx context.Context, topic string, evt interface{}) error {
-	emitterCtx := ctdevents.WithTopic(ctx, topic)
-	if err := r.emitter.Post(emitterCtx, evt); err != nil {
-		return err
-	}
-	return nil
-}
-
 func (r *Runtime) adoptEvent(ctx context.Context, be *BaseEvent) {
 	if be.Type != "events.ContainerEvent" {
 		return
 	}
-	id, ok := r.refMap[be.Ref]
+	ref, ok := r.refMap[be.Ref]
+
 	if !ok {
 		log.G(ctx).Warningf("Unknown event reference: %s", be.Ref)
 		return
 	}
-	task, ok := r.tasks[id]
-	if !ok {
-		log.G(ctx).Warningf("Unknown task id %s for reference: %s", id, be.Ref)
+	ctx = namespaces.WithNamespace(ctx, ref.Namespace)
+
+	task, err := r.tasks.Get(ctx, ref.ID)
+	if err != nil {
+		log.G(ctx).Warningf("Event for an unknown container id: %s", ref.ID)
 		return
 	}
 
-	log.G(ctx).Debugf("Received container event: %s for %s(%s)", be.Event, be.Ref, id)
+	log.G(ctx).Debugf(
+		"Received container event: %s for %s(%s)",
+		be.Event, be.Ref, ref.ID)
 	switch be.Event {
 	case vwevents.ContainerPoweredOff:
-		r.events <- &events.TaskExit{
-			ContainerID: id,
+		e := &eventsapi.TaskExit{
+			ContainerID: ref.ID,
 			Pid:         1,
 			ExitStatus:  0,
 			ExitedAt:    be.CreatedTime,
 		}
+		publishEvent(ctx, r.events, e)
 		task.CloseIO(ctx)
 	default:
 		log.G(ctx).Warningf("Unknown event received: %s", be.Event)
@@ -261,51 +272,34 @@ func (r *Runtime) startEventProcessor(ctx context.Context) {
 	}
 	go r.pl.Events.GetEvents(plevents.NewGetEventsParamsWithContext(ctx), eventer)
 
-	go func() {
-		for e := range r.events {
-			// r.monEvents <- e
-			a, err := typeurl.MarshalAny(e)
-			if err != nil {
-				log.G(ctx).WithError(err).Error("marshal event")
-				return
-			}
-
-			topic := getTopic(e)
-			ctx = ctdevents.WithTopic(ctx, topic)
-			err = r.emitter.Post(ctx, &events.Envelope{
-				Timestamp: time.Now(),
-				Topic:     topic,
-				Event:     a,
-			})
-
-			if err != nil {
-				log.G(ctx).WithError(err).Error("post event")
-			}
-		}
-		log.G(ctx).Infof("Exited event processor")
-	}()
 }
 
+func publishEvent(ctx context.Context,
+	publisher ctdevents.Publisher,
+	event ctdevents.Event) {
+	topic := getTopic(event)
+	publisher.Publish(ctx, topic, event)
+}
 
 func getTopic(e interface{}) string {
 	switch e.(type) {
-	case *events.TaskCreate:
+	case *eventsapi.TaskCreate:
 		return runtime.TaskCreateEventTopic
-	case *events.TaskStart:
+	case *eventsapi.TaskStart:
 		return runtime.TaskStartEventTopic
-	case *events.TaskOOM:
+	case *eventsapi.TaskOOM:
 		return runtime.TaskOOMEventTopic
-	case *events.TaskExit:
+	case *eventsapi.TaskExit:
 		return runtime.TaskExitEventTopic
-	case *events.TaskDelete:
+	case *eventsapi.TaskDelete:
 		return runtime.TaskDeleteEventTopic
-	case *events.TaskExecAdded:
+	case *eventsapi.TaskExecAdded:
 		return runtime.TaskExecAddedEventTopic
-	case *events.TaskPaused:
+	case *eventsapi.TaskPaused:
 		return runtime.TaskPausedEventTopic
-	case *events.TaskResumed:
+	case *eventsapi.TaskResumed:
 		return runtime.TaskResumedEventTopic
-	case *events.TaskCheckpointed:
+	case *eventsapi.TaskCheckpointed:
 		return runtime.TaskCheckpointedEventTopic
 	}
 	return "?"

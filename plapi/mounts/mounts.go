@@ -1,10 +1,9 @@
 package mounts
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"strings"
-
-	"crypto/sha256"
 
 	"github.com/containerd/containerd/mount"
 )
