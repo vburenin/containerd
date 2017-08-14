@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"io/ioutil"
+	"log"
 	"os"
 
 	"github.com/containerd/containerd/namespaces"
@@ -9,11 +11,15 @@ import (
 	"github.com/containerd/containerd/version"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli"
+	"google.golang.org/grpc/grpclog"
 )
 
 var extraCmds = []cli.Command{}
 
 func init() {
+	// Discard grpc logs so that they don't mess with our stdio
+	grpclog.SetLogger(log.New(ioutil.Discard, "", log.LstdFlags))
+
 	cli.VersionPrinter = func(c *cli.Context) {
 		fmt.Println(c.App.Name, version.Package, c.App.Version)
 	}
@@ -59,29 +65,21 @@ containerd CLI
 	}
 	app.Commands = append([]cli.Command{
 		applyCommand,
-		attachCommand,
-		checkpointCommand,
 		containersCommand,
 		contentCommand,
 		eventsCommand,
-		execCommand,
 		fetchCommand,
 		fetchObjectCommand,
 		imageCommand,
-		infoCommand,
-		killCommand,
 		namespacesCommand,
-		pauseCommand,
 		pprofCommand,
-		psCommand,
 		pullCommand,
 		pushCommand,
 		pushObjectCommand,
-		resumeCommand,
 		rootfsCommand,
 		runCommand,
 		snapshotCommand,
-		taskListCommand,
+		tasksCommand,
 		versionCommand,
 	}, extraCmds...)
 	app.Before = func(context *cli.Context) error {
@@ -94,15 +92,4 @@ containerd CLI
 		fmt.Fprintf(os.Stderr, "ctr: %s\n", err)
 		os.Exit(1)
 	}
-}
-
-var containersCommand = cli.Command{
-	Name:    "containers",
-	Usage:   "manage containers (metadata)",
-	Aliases: []string{"c"},
-	Subcommands: []cli.Command{
-		containersListCommand,
-		containersDeleteCommand,
-		containersSetLabelsCommand,
-	},
 }

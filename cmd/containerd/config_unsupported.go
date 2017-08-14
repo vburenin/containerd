@@ -1,4 +1,4 @@
-// +build !linux,!windows
+// +build !linux,!windows,!solaris
 
 package main
 
@@ -6,7 +6,8 @@ import "github.com/containerd/containerd/server"
 
 func defaultConfig() *server.Config {
 	return &server.Config{
-		Root: "/var/lib/containerd",
+		Root:  server.DefaultRootDir,
+		State: server.DefaultStateDir,
 		GRPC: server.GRPCConfig{
 			Address: server.DefaultAddress,
 		},

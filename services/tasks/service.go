@@ -100,11 +100,11 @@ func (s *Service) Create(ctx context.Context, r *api.CreateTaskRequest) (*api.Cr
 		if r.Checkpoint.MediaType != images.MediaTypeContainerd1Checkpoint {
 			return nil, fmt.Errorf("unsupported checkpoint type %q", r.Checkpoint.MediaType)
 		}
-		reader, err := s.store.Reader(ctx, r.Checkpoint.Digest)
+		reader, err := s.store.ReaderAt(ctx, r.Checkpoint.Digest)
 		if err != nil {
 			return nil, err
 		}
-		_, err = archive.Apply(ctx, checkpointPath, reader)
+		_, err = archive.Apply(ctx, checkpointPath, content.NewReader(reader))
 		reader.Close()
 		if err != nil {
 			return nil, err
@@ -227,17 +227,20 @@ func processFromContainerd(ctx context.Context, p runtime.Process) (*task.Proces
 		status = task.StatusStopped
 	case runtime.PausedStatus:
 		status = task.StatusPaused
+	case runtime.PausingStatus:
+		status = task.StatusPausing
 	default:
 		log.G(ctx).WithField("status", state.Status).Warn("unknown status")
 	}
 	return &task.Process{
-		ID:       p.ID(),
-		Pid:      state.Pid,
-		Status:   status,
-		Stdin:    state.Stdin,
-		Stdout:   state.Stdout,
-		Stderr:   state.Stderr,
-		Terminal: state.Terminal,
+		ID:         p.ID(),
+		Pid:        state.Pid,
+		Status:     status,
+		Stdin:      state.Stdin,
+		Stdout:     state.Stdout,
+		Stderr:     state.Stderr,
+		Terminal:   state.Terminal,
+		ExitStatus: state.ExitStatus,
 	}, nil
 }
 

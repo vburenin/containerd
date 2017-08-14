@@ -6,26 +6,23 @@ import (
 	gocontext "context"
 	"fmt"
 	"io"
-	"io/ioutil"
-	"log"
 	"net"
 	"os"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/containerd/fifo"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/grpclog"
 )
 
 func prepareStdio(stdin, stdout, stderr string, console bool) (wg *sync.WaitGroup, err error) {
 	wg = &sync.WaitGroup{}
 	ctx := gocontext.Background()
 
-	f, err := fifo.OpenFifo(ctx, stdin, syscall.O_WRONLY|syscall.O_CREAT|syscall.O_NONBLOCK, 0700)
+	f, err := fifo.OpenFifo(ctx, stdin, unix.O_WRONLY|unix.O_CREAT|unix.O_NONBLOCK, 0700)
 	if err != nil {
 		return nil, err
 	}
@@ -39,7 +36,7 @@ func prepareStdio(stdin, stdout, stderr string, console bool) (wg *sync.WaitGrou
 		w.Close()
 	}(f)
 
-	f, err = fifo.OpenFifo(ctx, stdout, syscall.O_RDONLY|syscall.O_CREAT|syscall.O_NONBLOCK, 0700)
+	f, err = fifo.OpenFifo(ctx, stdout, unix.O_RDONLY|unix.O_CREAT|unix.O_NONBLOCK, 0700)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +52,7 @@ func prepareStdio(stdin, stdout, stderr string, console bool) (wg *sync.WaitGrou
 		wg.Done()
 	}(f)
 
-	f, err = fifo.OpenFifo(ctx, stderr, syscall.O_RDONLY|syscall.O_CREAT|syscall.O_NONBLOCK, 0700)
+	f, err = fifo.OpenFifo(ctx, stderr, unix.O_RDONLY|unix.O_CREAT|unix.O_NONBLOCK, 0700)
 	if err != nil {
 		return nil, err
 	}
@@ -82,8 +79,6 @@ func getGRPCConnection(context *cli.Context) (*grpc.ClientConn, error) {
 	}
 
 	bindSocket := context.GlobalString("address")
-	// reset the logger for grpc to log to dev/null so that it does not mess with our stdio
-	grpclog.SetLogger(log.New(ioutil.Discard, "", log.LstdFlags))
 	dialOpts := []grpc.DialOption{grpc.WithInsecure(), grpc.WithTimeout(100 * time.Second)}
 	dialOpts = append(dialOpts,
 		grpc.WithDialer(func(addr string, timeout time.Duration) (net.Conn, error) {

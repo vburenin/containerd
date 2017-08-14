@@ -11,23 +11,36 @@ import (
 	"github.com/containerd/containerd/api/types"
 	"github.com/containerd/containerd/containers"
 	"github.com/containerd/containerd/errdefs"
-	"github.com/containerd/containerd/mount"
 	"github.com/containerd/containerd/typeurl"
 	specs "github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/pkg/errors"
 )
 
+// DeleteOpts allows the caller to set options for the deletion of a container
 type DeleteOpts func(context.Context, *Client, containers.Container) error
 
+// Container is a metadata object for container resources and task creation
 type Container interface {
+	// ID identifies the container
 	ID() string
+	// Info returns the underlying container record type
 	Info() containers.Container
+	// Delete removes the container
 	Delete(context.Context, ...DeleteOpts) error
+	// NewTask creates a new task based on the container metadata
 	NewTask(context.Context, IOCreation, ...NewTaskOpts) (Task, error)
+	// Spec returns the OCI runtime specification
 	Spec() (*specs.Spec, error)
+	// Task returns the current task for the container
+	//
+	// If IOAttach options are passed the client will reattach to the IO for the running
+	// task. If no task exists for the container a NotFound error is returned
 	Task(context.Context, IOAttach) (Task, error)
+	// Image returns the image that the container is based on
 	Image(context.Context) (Image, error)
+	// Labels returns the labels set on the container
 	Labels(context.Context) (map[string]string, error)
+	// SetLabels sets the provided labels for the container and returns the final label set
 	SetLabels(context.Context, map[string]string) (map[string]string, error)
 }
 
@@ -108,14 +121,6 @@ func (c *container) Spec() (*specs.Spec, error) {
 	return &s, nil
 }
 
-// WithSnapshotCleanup deletes the rootfs allocated for the container
-func WithSnapshotCleanup(ctx context.Context, client *Client, c containers.Container) error {
-	if c.RootFS != "" {
-		return client.SnapshotService(c.Snapshotter).Remove(ctx, c.RootFS)
-	}
-	return nil
-}
-
 // Delete deletes an existing container
 // an error is returned if the container has running tasks
 func (c *container) Delete(ctx context.Context, opts ...DeleteOpts) (err error) {
@@ -151,15 +156,6 @@ func (c *container) Image(ctx context.Context) (Image, error) {
 		client: c.client,
 		i:      i,
 	}, nil
-}
-
-type NewTaskOpts func(context.Context, *Client, *TaskInfo) error
-
-func WithRootFS(mounts []mount.Mount) NewTaskOpts {
-	return func(ctx context.Context, c *Client, ti *TaskInfo) error {
-		ti.RootFS = mounts
-		return nil
-	}
 }
 
 func (c *container) NewTask(ctx context.Context, ioCreate IOCreation, opts ...NewTaskOpts) (Task, error) {

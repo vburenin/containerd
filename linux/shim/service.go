@@ -30,7 +30,7 @@ var empty = &google_protobuf.Empty{}
 const RuncRoot = "/run/containerd/runc"
 
 // NewService returns a new shim service that can be used via GRPC
-func NewService(path, namespace string, publisher events.Publisher) (*Service, error) {
+func NewService(path, namespace, workDir string, publisher events.Publisher) (*Service, error) {
 	if namespace == "" {
 		return nil, fmt.Errorf("shim namespace cannot be empty")
 	}
@@ -41,6 +41,7 @@ func NewService(path, namespace string, publisher events.Publisher) (*Service, e
 		events:    make(chan interface{}, 4096),
 		namespace: namespace,
 		context:   context,
+		workDir:   workDir,
 	}
 	if err := s.initPlatform(); err != nil {
 		return nil, errors.Wrap(err, "failed to initialized platform behavior")
@@ -69,11 +70,12 @@ type Service struct {
 	namespace     string
 	context       context.Context
 
+	workDir  string
 	platform platform
 }
 
 func (s *Service) Create(ctx context.Context, r *shimapi.CreateTaskRequest) (*shimapi.CreateTaskResponse, error) {
-	process, err := newInitProcess(ctx, s.platform, s.path, s.namespace, r)
+	process, err := newInitProcess(ctx, s.platform, s.path, s.namespace, s.workDir, r)
 	if err != nil {
 		return nil, errdefs.ToGRPC(err)
 	}
@@ -145,8 +147,9 @@ func (s *Service) Delete(ctx context.Context, r *google_protobuf.Empty) (*shimap
 		return nil, errdefs.ToGRPCf(errdefs.ErrFailedPrecondition, "container must be created")
 	}
 	p := s.initProcess
-	// TODO (@crosbymichael): how to handle errors here
-	p.Delete(ctx)
+	if err := p.Delete(ctx); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	delete(s.processes, p.ID())
 	s.mu.Unlock()
@@ -176,8 +179,9 @@ func (s *Service) DeleteProcess(ctx context.Context, r *shimapi.DeleteProcessReq
 	if !ok {
 		return nil, errors.Wrapf(errdefs.ErrNotFound, "process %s not found", r.ID)
 	}
-	// TODO (@crosbymichael): how to handle errors here
-	p.Delete(ctx)
+	if err := p.Delete(ctx); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	delete(s.processes, p.ID())
 	s.mu.Unlock()
@@ -247,17 +251,20 @@ func (s *Service) State(ctx context.Context, r *shimapi.StateRequest) (*shimapi.
 		status = task.StatusStopped
 	case "paused":
 		status = task.StatusPaused
+	case "pausing":
+		status = task.StatusPausing
 	}
 	sio := p.Stdio()
 	return &shimapi.StateResponse{
-		ID:       p.ID(),
-		Bundle:   s.bundle,
-		Pid:      uint32(p.Pid()),
-		Status:   status,
-		Stdin:    sio.stdin,
-		Stdout:   sio.stdout,
-		Stderr:   sio.stderr,
-		Terminal: sio.terminal,
+		ID:         p.ID(),
+		Bundle:     s.bundle,
+		Pid:        uint32(p.Pid()),
+		Status:     status,
+		Stdin:      sio.stdin,
+		Stdout:     sio.stdout,
+		Stderr:     sio.stderr,
+		Terminal:   sio.terminal,
+		ExitStatus: uint32(p.ExitStatus()),
 	}, nil
 }
 

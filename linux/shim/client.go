@@ -81,6 +81,7 @@ func newCommand(binary, address string, debug bool, config Config, socket *os.Fi
 	args := []string{
 		"--namespace", config.Namespace,
 		"--address", address,
+		"--workdir", config.WorkDir,
 	}
 	if debug {
 		args = append(args, "--debug")
@@ -152,7 +153,7 @@ func WithConnect(ctx context.Context, config Config) (shim.ShimClient, io.Closer
 // WithLocal uses an in process shim
 func WithLocal(publisher events.Publisher) func(context.Context, Config) (shim.ShimClient, io.Closer, error) {
 	return func(ctx context.Context, config Config) (shim.ShimClient, io.Closer, error) {
-		service, err := NewService(config.Path, config.Namespace, publisher)
+		service, err := NewService(config.Path, config.Namespace, config.WorkDir, publisher)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -165,6 +166,7 @@ type Config struct {
 	Path       string
 	Namespace  string
 	CgroupPath string
+	WorkDir    string
 }
 
 // New returns a new shim client
@@ -207,7 +209,18 @@ func (c *Client) KillShim(ctx context.Context) error {
 	if os.Getpid() == pid {
 		return nil
 	}
-	return unix.Kill(pid, unix.SIGKILL)
+	if err := unix.Kill(pid, unix.SIGKILL); err != nil {
+		return err
+	}
+	// wait for shim to die after being SIGKILL'd
+	for {
+		// use kill(pid, 0) here because the shim could have been reparented
+		// and we are no longer able to waitpid(pid, ...) on the shim
+		if err := unix.Kill(pid, 0); err != nil && err == unix.ESRCH {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func (c *Client) Close() error {

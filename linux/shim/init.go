@@ -39,6 +39,8 @@ type initProcess struct {
 	// the reaper interface.
 	mu sync.Mutex
 
+	workDir string
+
 	id       string
 	bundle   string
 	console  console.Console
@@ -54,7 +56,7 @@ type initProcess struct {
 	rootfs   string
 }
 
-func newInitProcess(context context.Context, plat platform, path, namespace string, r *shimapi.CreateTaskRequest) (*initProcess, error) {
+func newInitProcess(context context.Context, plat platform, path, namespace, workDir string, r *shimapi.CreateTaskRequest) (*initProcess, error) {
 	var success bool
 
 	if err := identifiers.Validate(r.ID); err != nil {
@@ -109,7 +111,8 @@ func newInitProcess(context context.Context, plat platform, path, namespace stri
 			stderr:   r.Stderr,
 			terminal: r.Terminal,
 		},
-		rootfs: rootfs,
+		rootfs:  rootfs,
+		workDir: workDir,
 	}
 	var (
 		err    error
@@ -117,12 +120,12 @@ func newInitProcess(context context.Context, plat platform, path, namespace stri
 		io     runc.IO
 	)
 	if r.Terminal {
-		if socket, err = runc.NewConsoleSocket(filepath.Join(path, "pty.sock")); err != nil {
+		if socket, err = runc.NewTempConsoleSocket(); err != nil {
 			return nil, errors.Wrap(err, "failed to create OCI runtime console socket")
 		}
-		defer os.Remove(socket.Path())
+		defer socket.Close()
 	} else {
-		if io, err = runc.NewPipeIO(0, 0); err != nil {
+		if io, err = runc.NewPipeIO(); err != nil {
 			return nil, errors.Wrap(err, "failed to create OCI runtime io pipes")
 		}
 		p.io = io
@@ -132,7 +135,7 @@ func newInitProcess(context context.Context, plat platform, path, namespace stri
 		opts := &runc.RestoreOpts{
 			CheckpointOpts: runc.CheckpointOpts{
 				ImagePath:  r.Checkpoint,
-				WorkDir:    filepath.Join(r.Bundle, "work"),
+				WorkDir:    p.workDir,
 				ParentPath: r.ParentCheckpoint,
 			},
 			PidFile:     pidFile,
@@ -234,31 +237,33 @@ func (p *initProcess) SetExited(status int) {
 }
 
 func (p *initProcess) Delete(context context.Context) error {
-	status, err := p.Status(context)
-	if err != nil {
-		return err
-	}
-	if status != "stopped" {
-		return fmt.Errorf("cannot delete a running container")
-	}
 	p.killAll(context)
 	p.Wait()
-	err = p.runtime.Delete(context, p.id, nil)
+	err := p.runtime.Delete(context, p.id, nil)
+	// ignore errors if a runtime has already deleted the process
+	// but we still hold metadata and pipes
+	//
+	// this is common during a checkpoint, runc will delete the container state
+	// after a checkpoint and the container will no longer exist within runc
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			err = nil
+		} else {
+			err = p.runtimeError(err, "failed to delete task")
+		}
+	}
 	if p.io != nil {
 		for _, c := range p.closers {
 			c.Close()
 		}
 		p.io.Close()
 	}
-	err = p.runtimeError(err, "OCI runtime delete failed")
-
 	if err2 := mount.UnmountAll(p.rootfs, 0); err2 != nil {
-		log.G(context).WithError(err2).Warn("Failed to cleanup rootfs mount")
+		log.G(context).WithError(err2).Warn("failed to cleanup rootfs mount")
 		if err == nil {
-			err = errors.Wrap(err2, "Failed rootfs umount")
+			err = errors.Wrap(err2, "failed rootfs umount")
 		}
 	}
-
 	return err
 }
 
@@ -310,10 +315,10 @@ func (p *initProcess) Checkpoint(context context.Context, r *shimapi.CheckpointT
 	if !options.Exit {
 		actions = append(actions, runc.LeaveRunning)
 	}
-	work := filepath.Join(p.bundle, "work")
+	work := filepath.Join(p.workDir, "criu-work")
 	defer os.RemoveAll(work)
 	if err := p.runtime.Checkpoint(context, p.id, &runc.CheckpointOpts{
-		WorkDir:                  work,
+		WorkDir:                  p.workDir,
 		ImagePath:                r.Path,
 		AllowOpenTCP:             options.OpenTcp,
 		AllowExternalUnixSockets: options.ExternalUnixSockets,

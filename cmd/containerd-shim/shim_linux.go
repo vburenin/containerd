@@ -4,12 +4,12 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"syscall"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
 	"golang.org/x/net/context"
+	"golang.org/x/sys/unix"
 
 	"github.com/containerd/containerd/reaper"
 	"github.com/containerd/containerd/sys"
@@ -33,7 +33,7 @@ func setupSignals() (chan os.Signal, error) {
 }
 
 func newServer() *grpc.Server {
-	return grpc.NewServer(grpc.Creds(NewUnixSocketCredentils(0, 0)))
+	return grpc.NewServer(grpc.Creds(NewUnixSocketCredentials(0, 0)))
 }
 
 type unixSocketCredentials struct {
@@ -42,7 +42,7 @@ type unixSocketCredentials struct {
 	serverName string
 }
 
-func NewUnixSocketCredentils(uid, gid int) credentials.TransportCredentials {
+func NewUnixSocketCredentials(uid, gid int) credentials.TransportCredentials {
 	return &unixSocketCredentials{uid, gid, "locahost"}
 }
 
@@ -60,7 +60,7 @@ func (u *unixSocketCredentials) ServerHandshake(c net.Conn) (net.Conn, credentia
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "unixSocketCredentials: failed to retrieve connection underlying fd")
 	}
-	pcred, err := syscall.GetsockoptUcred(int(f.Fd()), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	pcred, err := unix.GetsockoptUcred(int(f.Fd()), unix.SOL_SOCKET, unix.SO_PEERCRED)
 	if err != nil {
 		return nil, nil, errors.Wrap(err, "unixSocketCredentials: failed to retrieve socket peer credentials")
 	}
