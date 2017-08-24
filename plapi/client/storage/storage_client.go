@@ -38,7 +38,7 @@ func (a *Client) CommitImage(params *CommitImageParams) (*CommitImageCreated, er
 		Method:             "PUT",
 		PathPattern:        "/snapshot/{store_name}",
 		ProducesMediaTypes: []string{"application/json"},
-		ConsumesMediaTypes: []string{"application/json", "application/octet-stream"},
+		ConsumesMediaTypes: []string{"application/json"},
 		Schemes:            []string{"http"},
 		Params:             params,
 		Reader:             &CommitImageReader{formats: a.formats},
@@ -143,6 +143,36 @@ func (a *Client) DeleteImage(params *DeleteImageParams) (*DeleteImageOK, error) 
 }
 
 /*
+ExportArchive exports tar archive from supplied target
+
+Exports a tar archive from the target device.
+*/
+func (a *Client) ExportArchive(params *ExportArchiveParams, writer io.Writer) (*ExportArchiveOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewExportArchiveParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "ExportArchive",
+		Method:             "GET",
+		PathPattern:        "/archive",
+		ProducesMediaTypes: []string{"application/x-tar"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &ExportArchiveReader{formats: a.formats, writer: writer},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*ExportArchiveOK), nil
+
+}
+
+/*
 GetImage inspects an image
 
 Inspect an image by id in an image store
@@ -227,6 +257,36 @@ func (a *Client) GetVolume(params *GetVolumeParams) (*GetVolumeOK, error) {
 		return nil, err
 	}
 	return result.(*GetVolumeOK), nil
+
+}
+
+/*
+ImportArchive imports tar stream to supplied target
+
+Imports a tar stream to a device at the target path
+*/
+func (a *Client) ImportArchive(params *ImportArchiveParams) (*ImportArchiveOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewImportArchiveParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "ImportArchive",
+		Method:             "POST",
+		PathPattern:        "/archive",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/x-tar"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &ImportArchiveReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*ImportArchiveOK), nil
 
 }
 
@@ -373,6 +433,34 @@ func (a *Client) RemoveVolume(params *RemoveVolumeParams) (*RemoveVolumeOK, erro
 }
 
 /*
+StatPath Fetches filesystem stats on the device id at the specified path
+*/
+func (a *Client) StatPath(params *StatPathParams) (*StatPathOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewStatPathParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "StatPath",
+		Method:             "HEAD",
+		PathPattern:        "/archive",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &StatPathReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*StatPathOK), nil
+
+}
+
+/*
 UnpackImage creates a new image layer not available for use
 
 Creates a new image layer in an image store that is not available for use
@@ -399,6 +487,34 @@ func (a *Client) UnpackImage(params *UnpackImageParams) (*UnpackImageCreated, er
 		return nil, err
 	}
 	return result.(*UnpackImageCreated), nil
+
+}
+
+/*
+UpdateImageMetadata Update image metadata
+*/
+func (a *Client) UpdateImageMetadata(params *UpdateImageMetadataParams) (*UpdateImageMetadataOK, error) {
+	// TODO: Validate the params before sending
+	if params == nil {
+		params = NewUpdateImageMetadataParams()
+	}
+
+	result, err := a.transport.Submit(&runtime.ClientOperation{
+		ID:                 "UpdateImageMetadata",
+		Method:             "PUT",
+		PathPattern:        "/metadata/{store_name}",
+		ProducesMediaTypes: []string{"application/json"},
+		ConsumesMediaTypes: []string{"application/json"},
+		Schemes:            []string{"http"},
+		Params:             params,
+		Reader:             &UpdateImageMetadataReader{formats: a.formats},
+		Context:            params.Context,
+		Client:             params.HTTPClient,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result.(*UpdateImageMetadataOK), nil
 
 }
 

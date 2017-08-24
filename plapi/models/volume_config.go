@@ -7,15 +7,14 @@ import (
 	strfmt "github.com/go-openapi/strfmt"
 
 	"github.com/go-openapi/errors"
-	"github.com/go-openapi/swag"
 )
 
 // VolumeConfig volume config
 // swagger:model VolumeConfig
 type VolumeConfig struct {
 
-	// label
-	Label []string `json:"label"`
+	// flags
+	Flags map[string]string `json:"flags,omitempty"`
 
 	// mount point
 	MountPoint string `json:"mountPoint,omitempty"`
@@ -31,22 +30,8 @@ type VolumeConfig struct {
 func (m *VolumeConfig) Validate(formats strfmt.Registry) error {
 	var res []error
 
-	if err := m.validateLabel(formats); err != nil {
-		// prop
-		res = append(res, err)
-	}
-
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
-	return nil
-}
-
-func (m *VolumeConfig) validateLabel(formats strfmt.Registry) error {
-
-	if swag.IsZero(m.Label) { // not required
-		return nil
-	}
-
 	return nil
 }
