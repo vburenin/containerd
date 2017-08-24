@@ -10,8 +10,6 @@ import (
 	"github.com/go-openapi/runtime"
 
 	strfmt "github.com/go-openapi/strfmt"
-
-	"github.com/containerd/containerd/plapi/models"
 )
 
 // ContainerGetStdoutReader is a Reader for the ContainerGetStdout structure.
@@ -89,21 +87,13 @@ func NewContainerGetStdoutNotFound() *ContainerGetStdoutNotFound {
 Container not found
 */
 type ContainerGetStdoutNotFound struct {
-	Payload *models.Error
 }
 
 func (o *ContainerGetStdoutNotFound) Error() string {
-	return fmt.Sprintf("[GET /interaction/{id}/stdout][%d] containerGetStdoutNotFound  %+v", 404, o.Payload)
+	return fmt.Sprintf("[GET /interaction/{id}/stdout][%d] containerGetStdoutNotFound ", 404)
 }
 
 func (o *ContainerGetStdoutNotFound) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
-
-	o.Payload = new(models.Error)
-
-	// response payload
-	if err := consumer.Consume(response.Body(), o.Payload); err != nil && err != io.EOF {
-		return err
-	}
 
 	return nil
 }
@@ -118,21 +108,13 @@ func NewContainerGetStdoutInternalServerError() *ContainerGetStdoutInternalServe
 Failed to get stdout
 */
 type ContainerGetStdoutInternalServerError struct {
-	Payload *models.Error
 }
 
 func (o *ContainerGetStdoutInternalServerError) Error() string {
-	return fmt.Sprintf("[GET /interaction/{id}/stdout][%d] containerGetStdoutInternalServerError  %+v", 500, o.Payload)
+	return fmt.Sprintf("[GET /interaction/{id}/stdout][%d] containerGetStdoutInternalServerError ", 500)
 }
 
 func (o *ContainerGetStdoutInternalServerError) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
-
-	o.Payload = new(models.Error)
-
-	// response payload
-	if err := consumer.Consume(response.Body(), o.Payload); err != nil && err != io.EOF {
-		return err
-	}
 
 	return nil
 }

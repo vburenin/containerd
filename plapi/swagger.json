@@ -175,6 +175,221 @@
 				}
 			}
 		},
+		"/archive": {
+			"get": {
+				"description": "Exports a tar archive from the target device.",
+				"summary": "Export tar archive from supplied target",
+				"tags": [
+					"storage"
+				],
+				"produces": [
+					"application/x-tar"
+				],
+				"operationId": "ExportArchive",
+				"parameters": [
+					{
+						"name": "store",
+						"in": "query",
+						"required": true,
+						"type": "string",
+						"x-nullable": false
+					},
+					{
+						"name": "ancestorStore",
+						"in": "query",
+						"required": false,
+						"type": "string",
+						"x-nullable": false
+					},
+					{
+						"name": "deviceID",
+						"in": "query",
+						"required": true,
+						"type": "string",
+						"x-nullable": false
+					},
+					{
+						"name": "ancestor",
+						"in": "query",
+						"required": false,
+						"type": "string",
+						"x-nullable": false
+					},
+					{
+						"name": "data",
+						"in": "query",
+						"required": true,
+						"type": "boolean",
+						"x-nullable": false
+					},
+					{
+						"name": "filterSpec",
+						"in": "query",
+						"required": false,
+						"type": "string",
+						"x-nullable": true
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK",
+						"schema": {
+							"format": "binary"
+						}
+					},
+					"404": {
+						"description": "Supplied target not found"
+					},
+					"422": {
+						"description": "Format error in supplied filter or archive"
+					},
+					"423": {
+						"description": "Device or resource is locked"
+					},
+					"500": {
+						"description": "failed to export tar archive from target"
+					},
+					"default": {
+						"description": "error"
+					}
+				}
+			},
+			"post": {
+				"description": "Imports a tar stream to a device at the target path",
+				"summary": "Import tar stream to supplied target",
+				"tags": [
+					"storage"
+				],
+				"consumes": [
+					"application/x-tar"
+				],
+				"operationId": "ImportArchive",
+				"parameters": [
+					{
+						"name": "store",
+						"in": "query",
+						"required": true,
+						"type": "string",
+						"x-nullable": false
+					},
+					{
+						"name": "deviceID",
+						"in": "query",
+						"required": true,
+						"type": "string",
+						"x-nullable": false
+					},
+					{
+						"name": "filterSpec",
+						"in": "query",
+						"required": false,
+						"type": "string",
+						"x-nullable": true
+					},
+					{
+						"name": "Archive",
+						"required": true,
+						"in": "body",
+						"schema": {
+							"type": "string",
+							"format": "binary"
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK"
+					},
+					"422": {
+						"description": "Format error in supplied filter or archive"
+					},
+					"404": {
+						"description": "Supplied target not found"
+					},
+					"409": {
+						"description": "Unexpected resource conflict"
+					},
+					"423": {
+						"description": "Device or resource is locked"
+					},
+					"500": {
+						"description": "failed to export tar archive from target"
+					},
+					"default": {
+						"description": "error"
+					}
+				}
+			},
+			"head": {
+				"description": "Fetches filesystem stats on the device id at the specified path",
+				"operationId": "StatPath",
+				"tags": [
+					"storage"
+				],
+				"parameters": [
+					{
+						"name": "store",
+						"in": "query",
+						"required": true,
+						"type": "string",
+						"x-nullable": false
+					},
+					{
+						"name": "deviceID",
+						"in": "query",
+						"required": true,
+						"type": "string",
+						"x-nullable": false
+					},
+					{
+						"name": "filterSpec",
+						"in": "query",
+						"required": false,
+						"type": "string",
+						"x-nullable": true
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK",
+						"headers": {
+							"name": {
+								"type": "string",
+								"x-nullable": false
+							},
+							"mode": {
+								"type": "integer",
+								"format": "uint32"
+							},
+							"size": {
+								"type": "integer",
+								"format": "int64"
+							},
+							"linkTarget": {
+								"type": "string",
+								"x-nullable": false
+							},
+							"modTime": {
+								"type": "string",
+								"x-nullable": false
+							}
+						}
+					},
+					"422": {
+						"description": "Format error in supplied filter or archive"
+					},
+					"404": {
+						"description": "Supplied target not found"
+					},
+					"500": {
+						"description": "failed to export tar archive from target"
+					},
+					"default": {
+						"description": "error"
+					}
+				}
+			}
+		},
 		"/storage": {
 			"post": {
 				"description": "Creates a location to store images",
@@ -440,6 +655,58 @@
 				}
 			}
 		},
+		"/metadata/{store_name}": {
+			"put": {
+				"description": "Update image metadata",
+				"operationId": "UpdateImageMetadata",
+				"tags": [
+					"storage"
+				],
+				"parameters": [
+					{
+						"name": "store_name",
+						"type": "string",
+						"in": "path",
+						"required": true
+					},
+					{
+						"name": "image_id",
+						"type": "string",
+						"in": "query",
+						"required": true
+					},
+					{
+						"description": "Due to the swagger limitation, this parameter represents array of metadata where even elements are the key names and the odd ones are the data",
+						"name": "meta",
+						"required": false,
+						"in": "body",
+						"schema": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						}
+					}
+				],
+				"responses": {
+					"200": {
+						"description": "OK"
+					},
+					"404": {
+						"description": "Not found",
+						"schema": {
+							"$ref": "#/definitions/Error"
+						}
+					},
+					"default": {
+						"description": "error",
+						"schema": {
+							"$ref": "#/definitions/Error"
+						}
+					}
+				}
+			}
+		},
 		"/snapshot/{store_name}": {
 			"get": {
 				"description": "List all available images",
@@ -586,8 +853,7 @@
 					"storage"
 				],
 				"consumes": [
-					"application/json",
-					"application/octet-stream"
+					"application/json"
 				],
 				"produces": [
 					"application/json"
@@ -601,22 +867,28 @@
 						"required": true
 					},
 					{
-						"name": "old_id",
+						"name": "active_id",
 						"type": "string",
 						"in": "query",
 						"required": true
 					},
 					{
-						"name": "new_id",
+						"name": "commit_id",
 						"type": "string",
 						"in": "query",
 						"required": true
 					},
 					{
-						"name": "orig_name",
-						"type": "string",
-						"in": "query",
-						"required": true
+						"description": "Due to the swagger limitation, this parameter represents array of metadata where even elements are the key names and the odd ones are the data",
+						"name": "meta",
+						"required": false,
+						"in": "body",
+						"schema": {
+							"type": "array",
+							"items": {
+								"type": "string"
+							}
+						}
 					}
 				],
 				"responses": {
@@ -2713,16 +2985,10 @@
 						}
 					},
 					"404": {
-						"description": "Container not found",
-						"schema": {
-							"$ref": "#/definitions/Error"
-						}
+						"description": "Container not found"
 					},
 					"500": {
-						"description": "Failed to get stdout",
-						"schema": {
-							"$ref": "#/definitions/Error"
-						}
+						"description": "Failed to get stdout"
 					}
 				}
 			}
@@ -2763,16 +3029,10 @@
 						}
 					},
 					"404": {
-						"description": "Container not found",
-						"schema": {
-							"$ref": "#/definitions/Error"
-						}
+						"description": "Container not found"
 					},
 					"500": {
-						"description": "Failed to get stderr",
-						"schema": {
-							"$ref": "#/definitions/Error"
-						}
+						"description": "Failed to get stderr"
 					}
 				}
 			}
@@ -3434,17 +3694,17 @@
 		"VolumeConfig": {
 			"type": "object",
 			"properties": {
-				"label": {
-					"type": "array",
-					"items": {
-						"type": "string"
-					}
-				},
 				"name": {
 					"type": "string"
 				},
 				"mountPoint": {
 					"type": "string"
+				},
+				"flags": {
+					"type": "object",
+					"additionalProperties": {
+						"type": "string"
+					}
 				},
 				"readWrite": {
 					"type": "boolean"
@@ -3656,9 +3916,6 @@
 					}
 				},
 				"workingDir": {
-					"type": "string"
-				},
-				"user": {
 					"type": "string"
 				},
 				"env": {

@@ -60,12 +60,15 @@ for the commit image operation typically these are written to a http.Request
 */
 type CommitImageParams struct {
 
-	/*NewID*/
-	NewID string
-	/*OldID*/
-	OldID string
-	/*OrigName*/
-	OrigName string
+	/*ActiveID*/
+	ActiveID string
+	/*CommitID*/
+	CommitID string
+	/*Meta
+	  Due to the swagger limitation, this parameter represents array of metadata where even elements are the key names and the odd ones are the data
+
+	*/
+	Meta []string
 	/*StoreName*/
 	StoreName string
 
@@ -107,37 +110,37 @@ func (o *CommitImageParams) SetHTTPClient(client *http.Client) {
 	o.HTTPClient = client
 }
 
-// WithNewID adds the newID to the commit image params
-func (o *CommitImageParams) WithNewID(newID string) *CommitImageParams {
-	o.SetNewID(newID)
+// WithActiveID adds the activeID to the commit image params
+func (o *CommitImageParams) WithActiveID(activeID string) *CommitImageParams {
+	o.SetActiveID(activeID)
 	return o
 }
 
-// SetNewID adds the newId to the commit image params
-func (o *CommitImageParams) SetNewID(newID string) {
-	o.NewID = newID
+// SetActiveID adds the activeId to the commit image params
+func (o *CommitImageParams) SetActiveID(activeID string) {
+	o.ActiveID = activeID
 }
 
-// WithOldID adds the oldID to the commit image params
-func (o *CommitImageParams) WithOldID(oldID string) *CommitImageParams {
-	o.SetOldID(oldID)
+// WithCommitID adds the commitID to the commit image params
+func (o *CommitImageParams) WithCommitID(commitID string) *CommitImageParams {
+	o.SetCommitID(commitID)
 	return o
 }
 
-// SetOldID adds the oldId to the commit image params
-func (o *CommitImageParams) SetOldID(oldID string) {
-	o.OldID = oldID
+// SetCommitID adds the commitId to the commit image params
+func (o *CommitImageParams) SetCommitID(commitID string) {
+	o.CommitID = commitID
 }
 
-// WithOrigName adds the origName to the commit image params
-func (o *CommitImageParams) WithOrigName(origName string) *CommitImageParams {
-	o.SetOrigName(origName)
+// WithMeta adds the meta to the commit image params
+func (o *CommitImageParams) WithMeta(meta []string) *CommitImageParams {
+	o.SetMeta(meta)
 	return o
 }
 
-// SetOrigName adds the origName to the commit image params
-func (o *CommitImageParams) SetOrigName(origName string) {
-	o.OrigName = origName
+// SetMeta adds the meta to the commit image params
+func (o *CommitImageParams) SetMeta(meta []string) {
+	o.Meta = meta
 }
 
 // WithStoreName adds the storeName to the commit image params
@@ -159,31 +162,26 @@ func (o *CommitImageParams) WriteToRequest(r runtime.ClientRequest, reg strfmt.R
 	}
 	var res []error
 
-	// query param new_id
-	qrNewID := o.NewID
-	qNewID := qrNewID
-	if qNewID != "" {
-		if err := r.SetQueryParam("new_id", qNewID); err != nil {
+	// query param active_id
+	qrActiveID := o.ActiveID
+	qActiveID := qrActiveID
+	if qActiveID != "" {
+		if err := r.SetQueryParam("active_id", qActiveID); err != nil {
 			return err
 		}
 	}
 
-	// query param old_id
-	qrOldID := o.OldID
-	qOldID := qrOldID
-	if qOldID != "" {
-		if err := r.SetQueryParam("old_id", qOldID); err != nil {
+	// query param commit_id
+	qrCommitID := o.CommitID
+	qCommitID := qrCommitID
+	if qCommitID != "" {
+		if err := r.SetQueryParam("commit_id", qCommitID); err != nil {
 			return err
 		}
 	}
 
-	// query param orig_name
-	qrOrigName := o.OrigName
-	qOrigName := qrOrigName
-	if qOrigName != "" {
-		if err := r.SetQueryParam("orig_name", qOrigName); err != nil {
-			return err
-		}
+	if err := r.SetBodyParam(o.Meta); err != nil {
+		return err
 	}
 
 	// path param store_name

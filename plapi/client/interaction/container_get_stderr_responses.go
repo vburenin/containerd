@@ -10,8 +10,6 @@ import (
 	"github.com/go-openapi/runtime"
 
 	strfmt "github.com/go-openapi/strfmt"
-
-	"github.com/containerd/containerd/plapi/models"
 )
 
 // ContainerGetStderrReader is a Reader for the ContainerGetStderr structure.
@@ -89,21 +87,13 @@ func NewContainerGetStderrNotFound() *ContainerGetStderrNotFound {
 Container not found
 */
 type ContainerGetStderrNotFound struct {
-	Payload *models.Error
 }
 
 func (o *ContainerGetStderrNotFound) Error() string {
-	return fmt.Sprintf("[GET /interaction/{id}/stderr][%d] containerGetStderrNotFound  %+v", 404, o.Payload)
+	return fmt.Sprintf("[GET /interaction/{id}/stderr][%d] containerGetStderrNotFound ", 404)
 }
 
 func (o *ContainerGetStderrNotFound) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
-
-	o.Payload = new(models.Error)
-
-	// response payload
-	if err := consumer.Consume(response.Body(), o.Payload); err != nil && err != io.EOF {
-		return err
-	}
 
 	return nil
 }
@@ -118,21 +108,13 @@ func NewContainerGetStderrInternalServerError() *ContainerGetStderrInternalServe
 Failed to get stderr
 */
 type ContainerGetStderrInternalServerError struct {
-	Payload *models.Error
 }
 
 func (o *ContainerGetStderrInternalServerError) Error() string {
-	return fmt.Sprintf("[GET /interaction/{id}/stderr][%d] containerGetStderrInternalServerError  %+v", 500, o.Payload)
+	return fmt.Sprintf("[GET /interaction/{id}/stderr][%d] containerGetStderrInternalServerError ", 500)
 }
 
 func (o *ContainerGetStderrInternalServerError) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
-
-	o.Payload = new(models.Error)
-
-	// response payload
-	if err := consumer.Consume(response.Body(), o.Payload); err != nil && err != io.EOF {
-		return err
-	}
 
 	return nil
 }
