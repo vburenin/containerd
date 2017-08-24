@@ -9,16 +9,16 @@ import (
 	"github.com/containerd/containerd/snapshot/testsuite"
 )
 
-func newSnapshotter(ctx context.Context, root string) (snapshot.Snapshotter, func(), error) {
+func newSnapshotter(ctx context.Context, root string) (snapshot.Snapshotter, func() error, error) {
 	client, err := New(address)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	sn := client.SnapshotService("")
+	sn := client.SnapshotService(DefaultSnapshotter)
 
-	return sn, func() {
-		client.Close()
+	return sn, func() error {
+		return client.Close()
 	}, nil
 }
 

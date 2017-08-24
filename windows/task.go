@@ -47,11 +47,13 @@ func (t *task) State(ctx context.Context) (runtime.State, error) {
 	var (
 		status     runtime.Status
 		exitStatus uint32
+		exitedAt   time.Time
 	)
 
 	if p := t.getProcess(t.id); p != nil {
 		status = p.Status()
 		exitStatus = p.exitCode
+		exitedAt = p.exitTime
 	} else {
 		status = t.getStatus()
 	}
@@ -64,6 +66,7 @@ func (t *task) State(ctx context.Context) (runtime.State, error) {
 		Stderr:     t.io.src.Stderr,
 		Terminal:   t.io.src.Terminal,
 		ExitStatus: exitStatus,
+		ExitedAt:   exitedAt,
 	}, nil
 }
 
@@ -114,6 +117,7 @@ func (t *task) Start(ctx context.Context) error {
 		return err
 	}
 	if err := p.Start(ctx); err != nil {
+		t.removeProcess(t.id)
 		return err
 	}
 	t.publisher.Publish(ctx,
@@ -236,6 +240,13 @@ func (t *task) DeleteProcess(ctx context.Context, id string) (*runtime.Exit, err
 		if err != nil {
 			return nil, err
 		}
+
+		// If we never started the process close the pipes
+		if p.Status() == runtime.CreatedStatus {
+			p.io.Close()
+			ea = time.Now()
+		}
+
 		t.removeProcess(id)
 		return &runtime.Exit{
 			Pid:       p.pid,

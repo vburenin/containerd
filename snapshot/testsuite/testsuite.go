@@ -19,30 +19,33 @@ import (
 )
 
 // SnapshotterSuite runs a test suite on the snapshotter given a factory function.
-func SnapshotterSuite(t *testing.T, name string, snapshotterFn func(ctx context.Context, root string) (snapshot.Snapshotter, func(), error)) {
-	t.Run("Basic", makeTest(t, name, snapshotterFn, checkSnapshotterBasic))
-	t.Run("StatActive", makeTest(t, name, snapshotterFn, checkSnapshotterStatActive))
-	t.Run("StatComitted", makeTest(t, name, snapshotterFn, checkSnapshotterStatCommitted))
-	t.Run("TransitivityTest", makeTest(t, name, snapshotterFn, checkSnapshotterTransitivity))
-	t.Run("PreareViewFailingtest", makeTest(t, name, snapshotterFn, checkSnapshotterPrepareView))
-	t.Run("Update", makeTest(t, name, snapshotterFn, checkUpdate))
-	t.Run("Remove", makeTest(t, name, snapshotterFn, checkRemove))
+func SnapshotterSuite(t *testing.T, name string, snapshotterFn func(ctx context.Context, root string) (snapshot.Snapshotter, func() error, error)) {
+	restoreMask := clearMask()
+	defer restoreMask()
 
-	t.Run("LayerFileupdate", makeTest(t, name, snapshotterFn, checkLayerFileUpdate))
-	t.Run("RemoveDirectoryInLowerLayer", makeTest(t, name, snapshotterFn, checkRemoveDirectoryInLowerLayer))
-	t.Run("Chown", makeTest(t, name, snapshotterFn, checkChown))
-	t.Run("DirectoryPermissionOnCommit", makeTest(t, name, snapshotterFn, checkDirectoryPermissionOnCommit))
+	t.Run("Basic", makeTest(name, snapshotterFn, checkSnapshotterBasic))
+	t.Run("StatActive", makeTest(name, snapshotterFn, checkSnapshotterStatActive))
+	t.Run("StatComitted", makeTest(name, snapshotterFn, checkSnapshotterStatCommitted))
+	t.Run("TransitivityTest", makeTest(name, snapshotterFn, checkSnapshotterTransitivity))
+	t.Run("PreareViewFailingtest", makeTest(name, snapshotterFn, checkSnapshotterPrepareView))
+	t.Run("Update", makeTest(name, snapshotterFn, checkUpdate))
+	t.Run("Remove", makeTest(name, snapshotterFn, checkRemove))
+
+	t.Run("LayerFileupdate", makeTest(name, snapshotterFn, checkLayerFileUpdate))
+	t.Run("RemoveDirectoryInLowerLayer", makeTest(name, snapshotterFn, checkRemoveDirectoryInLowerLayer))
+	t.Run("Chown", makeTest(name, snapshotterFn, checkChown))
+	t.Run("DirectoryPermissionOnCommit", makeTest(name, snapshotterFn, checkDirectoryPermissionOnCommit))
 
 	// Rename test still fails on some kernels with overlay
-	//t.Run("Rename", makeTest(t, name, snapshotterFn, checkRename))
+	//t.Run("Rename", makeTest(name, snapshotterFn, checkRename))
 }
 
-func makeTest(t *testing.T, name string, snapshotterFn func(ctx context.Context, root string) (snapshot.Snapshotter, func(), error), fn func(ctx context.Context, t *testing.T, snapshotter snapshot.Snapshotter, work string)) func(t *testing.T) {
+func makeTest(name string, snapshotterFn func(ctx context.Context, root string) (snapshot.Snapshotter, func() error, error), fn func(ctx context.Context, t *testing.T, snapshotter snapshot.Snapshotter, work string)) func(t *testing.T) {
 	return func(t *testing.T) {
+		t.Parallel()
+
 		ctx := context.Background()
 		ctx = namespaces.WithNamespace(ctx, "testsuite")
-		restoreMask := clearMask()
-		defer restoreMask()
 		// Make two directories: a snapshotter root and a play area for the tests:
 		//
 		// 	/tmp
@@ -62,9 +65,15 @@ func makeTest(t *testing.T, name string, snapshotterFn func(ctx context.Context,
 
 		snapshotter, cleanup, err := snapshotterFn(ctx, root)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("Failed to initialize snapshotter: %+v", err)
 		}
-		defer cleanup()
+		defer func() {
+			if cleanup != nil {
+				if err := cleanup(); err != nil {
+					t.Errorf("Cleanup failed: %v", err)
+				}
+			}
+		}()
 
 		work := filepath.Join(tmpDir, "work")
 		if err := os.MkdirAll(work, 0777); err != nil {
@@ -181,7 +190,14 @@ func checkSnapshotterBasic(ctx context.Context, t *testing.T, snapshotter snapsh
 		return nil
 	}))
 
-	assert.Equal(t, expected, walked)
+	for ek, ev := range expected {
+		av, ok := walked[ek]
+		if !ok {
+			t.Errorf("Missing stat for %v", ek)
+			continue
+		}
+		assert.Equal(t, ev, av)
+	}
 
 	nextnext := filepath.Join(work, "nextnextlayer")
 	if err := os.MkdirAll(nextnext, 0777); err != nil {

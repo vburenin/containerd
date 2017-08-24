@@ -2,15 +2,13 @@ package containerd
 
 import (
 	"bytes"
-	"fmt"
-	"io"
 	"io/ioutil"
 	"os"
 	"runtime"
 	"strings"
-	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	// Register the typeurl
 	_ "github.com/containerd/containerd/runtime"
@@ -19,8 +17,12 @@ import (
 )
 
 func empty() IOCreation {
-	null := ioutil.Discard
-	return NewIO(bytes.NewBuffer(nil), null, null)
+	// TODO (@mlaventure) windows searches for pipes
+	// when none are provided
+	if runtime.GOOS == "windows" {
+		return Stdio
+	}
+	return NullIO
 }
 
 func TestContainerList(t *testing.T) {
@@ -44,6 +46,8 @@ func TestContainerList(t *testing.T) {
 }
 
 func TestNewContainer(t *testing.T) {
+	t.Parallel()
+
 	id := t.Name()
 	client, err := newClient(t, address)
 	if err != nil {
@@ -80,6 +84,8 @@ func TestNewContainer(t *testing.T) {
 }
 
 func TestContainerStart(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -113,21 +119,18 @@ func TestContainerStart(t *testing.T) {
 	}
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
-	task, err := container.NewTask(ctx, Stdio)
+	task, err := container.NewTask(ctx, empty())
 	if err != nil {
 		t.Error(err)
 		return
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if pid := task.Pid(); pid <= 0 {
 		t.Errorf("invalid task pid %d", pid)
@@ -138,19 +141,28 @@ func TestContainerStart(t *testing.T) {
 		return
 	}
 	status := <-statusC
-	if status != 7 {
-		t.Errorf("expected status 7 from wait but received %d", status)
-	}
-	if status, err = task.Delete(ctx); err != nil {
+	code, _, err := status.Result()
+	if err != nil {
 		t.Error(err)
 		return
 	}
-	if status != 7 {
-		t.Errorf("expected status 7 from delete but received %d", status)
+	if code != 7 {
+		t.Errorf("expected status 7 from wait but received %d", code)
+	}
+
+	deleteStatus, err := task.Delete(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if ec := deleteStatus.ExitCode(); ec != 7 {
+		t.Errorf("expected status 7 from delete but received %d", ec)
 	}
 }
 
 func TestContainerOutput(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -193,14 +205,11 @@ func TestContainerOutput(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := task.Start(ctx); err != nil {
 		t.Error(err)
@@ -208,8 +217,9 @@ func TestContainerOutput(t *testing.T) {
 	}
 
 	status := <-statusC
-	if status != 0 {
-		t.Errorf("expected status 0 but received %d", status)
+	code, _, _ := status.Result()
+	if code != 0 {
+		t.Errorf("expected status 0 but received %d", code)
 	}
 	if _, err := task.Delete(ctx); err != nil {
 		t.Error(err)
@@ -225,6 +235,8 @@ func TestContainerOutput(t *testing.T) {
 }
 
 func TestContainerExec(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -265,13 +277,11 @@ func TestContainerExec(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
-	finished := make(chan struct{}, 1)
-	go func() {
-		if _, err := task.Wait(ctx); err != nil {
-			t.Error(err)
-		}
-		close(finished)
-	}()
+	finishedC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := task.Start(ctx); err != nil {
 		t.Error(err)
@@ -287,14 +297,11 @@ func TestContainerExec(t *testing.T) {
 		t.Error(err)
 		return
 	}
-	processStatusC := make(chan uint32, 1)
-	go func() {
-		status, err := process.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		processStatusC <- status
-	}()
+	processStatusC, err := process.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := process.Start(ctx); err != nil {
 		t.Error(err)
@@ -303,25 +310,32 @@ func TestContainerExec(t *testing.T) {
 
 	// wait for the exec to return
 	status := <-processStatusC
+	code, _, err := status.Result()
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
-	if status != 6 {
-		t.Errorf("expected exec exit code 6 but received %d", status)
+	if code != 6 {
+		t.Errorf("expected exec exit code 6 but received %d", code)
 	}
 	deleteStatus, err := process.Delete(ctx)
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	if deleteStatus != 6 {
-		t.Errorf("expected delete exit code e6 but received %d", deleteStatus)
+	if ec := deleteStatus.ExitCode(); ec != 6 {
+		t.Errorf("expected delete exit code 6 but received %d", ec)
 	}
 	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
 		t.Error(err)
 	}
-	<-finished
+	<-finishedC
 }
 
 func TestContainerPids(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -362,14 +376,11 @@ func TestContainerPids(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := task.Start(ctx); err != nil {
 		t.Error(err)
@@ -401,6 +412,8 @@ func TestContainerPids(t *testing.T) {
 }
 
 func TestContainerCloseIO(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -450,22 +463,15 @@ func TestContainerCloseIO(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
-
-	if err := task.Start(ctx); err != nil {
+	statusC, err := task.Wait(ctx)
+	if err != nil {
 		t.Error(err)
 		return
 	}
 
-	if _, err := fmt.Fprint(w, expected); err != nil {
+	if err := task.Start(ctx); err != nil {
 		t.Error(err)
+		return
 	}
 	w.Close()
 	if err := task.CloseIO(ctx, WithStdinCloser); err != nil {
@@ -473,158 +479,11 @@ func TestContainerCloseIO(t *testing.T) {
 	}
 
 	<-statusC
-
-	if _, err := task.Delete(ctx); err != nil {
-		t.Error(err)
-	}
-
-	output := stdout.String()
-
-	if runtime.GOOS == "windows" {
-		// On windows we use more and it always adds an extra newline
-		// remove it here
-		output = strings.TrimSuffix(output, newLine)
-	}
-
-	if output != expected {
-		t.Errorf("expected output %q but received %q", expected, output)
-	}
-}
-
-func TestContainerAttach(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		// On windows, closing the write side of the pipe closes the read
-		// side, sending an EOF to it and preventing reopening it.
-		// Hence this test will always fails on windows
-		t.Skip("invalid logic on windows")
-	}
-
-	client, err := newClient(t, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer client.Close()
-
-	var (
-		image       Image
-		ctx, cancel = testContext()
-		id          = t.Name()
-	)
-	defer cancel()
-
-	if runtime.GOOS != "windows" {
-		image, err = client.GetImage(ctx, testImage)
-		if err != nil {
-			t.Error(err)
-			return
-		}
-	}
-
-	spec, err := generateSpec(withImageConfig(ctx, image), withCat())
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer container.Delete(ctx, WithSnapshotCleanup)
-
-	expected := "hello" + newLine
-	stdout := bytes.NewBuffer(nil)
-
-	r, w, err := os.Pipe()
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	or, ow, err := os.Pipe()
-	if err != nil {
-		t.Error(err)
-		return
-	}
-
-	wg := &sync.WaitGroup{}
-
-	wg.Add(1)
-	go func() {
-		io.Copy(stdout, or)
-		wg.Done()
-	}()
-
-	task, err := container.NewTask(ctx, NewIO(r, ow, ioutil.Discard))
-	if err != nil {
-		t.Error(err)
-		return
-	}
-	defer task.Delete(ctx)
-	originalIO := task.IO()
-
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
-
-	if err := task.Start(ctx); err != nil {
-		t.Error(err)
-		return
-	}
-
-	if _, err := fmt.Fprint(w, expected); err != nil {
-		t.Error(err)
-	}
-	w.Close()
-
-	// load the container and re-load the task
-	if container, err = client.LoadContainer(ctx, id); err != nil {
-		t.Error(err)
-		return
-	}
-
-	// create new IO for the loaded task
-	if r, w, err = os.Pipe(); err != nil {
-		t.Error(err)
-		return
-	}
-	if task, err = container.Task(ctx, WithAttach(r, ow, ioutil.Discard)); err != nil {
-		t.Error(err)
-		return
-	}
-
-	if _, err := fmt.Fprint(w, expected); err != nil {
-		t.Error(err)
-	}
-	w.Close()
-
-	if err := task.CloseIO(ctx, WithStdinCloser); err != nil {
-		t.Error(err)
-	}
-
-	<-statusC
-
-	originalIO.Close()
-	if _, err := task.Delete(ctx); err != nil {
-		t.Error(err)
-	}
-	ow.Close()
-
-	wg.Wait()
-	output := stdout.String()
-
-	// we wrote the same thing after attach
-	expected = expected + expected
-	if output != expected {
-		t.Errorf("expected output %q but received %q", expected, output)
-	}
 }
 
 func TestDeleteRunningContainer(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -665,14 +524,11 @@ func TestDeleteRunningContainer(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := task.Start(ctx); err != nil {
 		t.Error(err)
@@ -694,6 +550,8 @@ func TestDeleteRunningContainer(t *testing.T) {
 }
 
 func TestContainerKill(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -715,7 +573,7 @@ func TestContainerKill(t *testing.T) {
 		}
 	}
 
-	spec, err := generateSpec(withImageConfig(ctx, image), withCat())
+	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("sleep", "10"))
 	if err != nil {
 		t.Error(err)
 		return
@@ -727,21 +585,18 @@ func TestContainerKill(t *testing.T) {
 	}
 	defer container.Delete(ctx)
 
-	task, err := container.NewTask(ctx, Stdio)
+	task, err := container.NewTask(ctx, empty())
 	if err != nil {
 		t.Error(err)
 		return
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := task.Start(ctx); err != nil {
 		t.Error(err)
@@ -764,6 +619,8 @@ func TestContainerKill(t *testing.T) {
 }
 
 func TestContainerNoBinaryExists(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -785,7 +642,7 @@ func TestContainerNoBinaryExists(t *testing.T) {
 		}
 	}
 
-	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("nothing"))
+	spec, err := generateSpec(withImageConfig(ctx, image), WithProcessArgs("nothing"))
 	if err != nil {
 		t.Error(err)
 		return
@@ -797,15 +654,15 @@ func TestContainerNoBinaryExists(t *testing.T) {
 	}
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
-	task, err := container.NewTask(ctx, Stdio)
+	task, err := container.NewTask(ctx, empty())
 	switch runtime.GOOS {
 	case "windows":
 		if err != nil {
-			t.Errorf("failed to create task %v", err)
+			t.Fatalf("failed to create task %v", err)
 		}
-		if err := task.Start(ctx); err != nil {
+		defer task.Delete(ctx, WithProcessKill)
+		if err := task.Start(ctx); err == nil {
 			t.Error("task.Start() should return an error when binary does not exist")
-			task.Delete(ctx)
 		}
 	default:
 		if err == nil {
@@ -816,6 +673,8 @@ func TestContainerNoBinaryExists(t *testing.T) {
 }
 
 func TestContainerExecNoBinaryExists(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -856,18 +715,14 @@ func TestContainerExecNoBinaryExists(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
+	finishedC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+	}
 	if err := task.Start(ctx); err != nil {
 		t.Error(err)
 		return
 	}
-
-	finished := make(chan struct{}, 1)
-	go func() {
-		if _, err := task.Wait(ctx); err != nil {
-			t.Error(err)
-		}
-		close(finished)
-	}()
 
 	// start an exec process without running the original container process
 	processSpec := spec.Process
@@ -887,10 +742,12 @@ func TestContainerExecNoBinaryExists(t *testing.T) {
 	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
 		t.Error(err)
 	}
-	<-finished
+	<-finishedC
 }
 
 func TestUserNamespaces(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -931,21 +788,18 @@ func TestUserNamespaces(t *testing.T) {
 	}
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
-	task, err := container.NewTask(ctx, Stdio)
+	task, err := container.NewTask(ctx, empty())
 	if err != nil {
 		t.Error(err)
 		return
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if pid := task.Pid(); pid <= 0 {
 		t.Errorf("invalid task pid %d", pid)
@@ -956,19 +810,27 @@ func TestUserNamespaces(t *testing.T) {
 		return
 	}
 	status := <-statusC
-	if status != 7 {
-		t.Errorf("expected status 7 from wait but received %d", status)
-	}
-	if status, err = task.Delete(ctx); err != nil {
+	code, _, err := status.Result()
+	if err != nil {
 		t.Error(err)
 		return
 	}
-	if status != 7 {
-		t.Errorf("expected status 7 from delete but received %d", status)
+	if code != 7 {
+		t.Errorf("expected status 7 from wait but received %d", code)
+	}
+	deleteStatus, err := task.Delete(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if ec := deleteStatus.ExitCode(); ec != 7 {
+		t.Errorf("expected status 7 from delete but received %d", ec)
 	}
 }
 
 func TestWaitStoppedTask(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -1002,21 +864,18 @@ func TestWaitStoppedTask(t *testing.T) {
 	}
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
-	task, err := container.NewTask(ctx, Stdio)
+	task, err := container.NewTask(ctx, empty())
 	if err != nil {
 		t.Error(err)
 		return
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if pid := task.Pid(); pid <= 0 {
 		t.Errorf("invalid task pid %d", pid)
@@ -1026,19 +885,28 @@ func TestWaitStoppedTask(t *testing.T) {
 		task.Delete(ctx)
 		return
 	}
+
 	// wait for the task to stop then call wait again
 	<-statusC
-	status, err := task.Wait(ctx)
+	statusC, err = task.Wait(ctx)
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	if status != 7 {
-		t.Errorf("exit status from stopped task should be 7 but received %d", status)
+	status := <-statusC
+	code, _, err := status.Result()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if code != 7 {
+		t.Errorf("exit status from stopped task should be 7 but received %d", code)
 	}
 }
 
 func TestWaitStoppedProcess(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -1079,13 +947,10 @@ func TestWaitStoppedProcess(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
-	finished := make(chan struct{}, 1)
-	go func() {
-		if _, err := task.Wait(ctx); err != nil {
-			t.Error(err)
-		}
-		close(finished)
-	}()
+	finishedC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+	}
 
 	if err := task.Start(ctx); err != nil {
 		t.Error(err)
@@ -1102,14 +967,12 @@ func TestWaitStoppedProcess(t *testing.T) {
 		return
 	}
 	defer process.Delete(ctx)
-	processStatusC := make(chan uint32, 1)
-	go func() {
-		status, err := process.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		processStatusC <- status
-	}()
+
+	statusC, err := process.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := process.Start(ctx); err != nil {
 		t.Error(err)
@@ -1117,23 +980,33 @@ func TestWaitStoppedProcess(t *testing.T) {
 	}
 
 	// wait for the exec to return
-	<-processStatusC
+	<-statusC
+
 	// try to wait on the process after it has stopped
-	status, err := process.Wait(ctx)
+	statusC, err = process.Wait(ctx)
 	if err != nil {
 		t.Error(err)
 		return
 	}
-	if status != 6 {
-		t.Errorf("exit status from stopped process should be 6 but received %d", status)
+	status := <-statusC
+	code, _, err := status.Result()
+	if err != nil {
+		t.Error(err)
+		return
 	}
+	if code != 6 {
+		t.Errorf("exit status from stopped process should be 6 but received %d", code)
+	}
+
 	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
 		t.Error(err)
 	}
-	<-finished
+	<-finishedC
 }
 
 func TestTaskForceDelete(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -1166,7 +1039,7 @@ func TestTaskForceDelete(t *testing.T) {
 	}
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
-	task, err := container.NewTask(ctx, Stdio)
+	task, err := container.NewTask(ctx, empty())
 	if err != nil {
 		t.Error(err)
 		return
@@ -1185,6 +1058,8 @@ func TestTaskForceDelete(t *testing.T) {
 }
 
 func TestProcessForceDelete(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -1217,21 +1092,18 @@ func TestProcessForceDelete(t *testing.T) {
 	}
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
-	task, err := container.NewTask(ctx, Stdio)
+	task, err := container.NewTask(ctx, empty())
 	if err != nil {
 		t.Error(err)
 		return
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	// task must be started on windows
 	if err := task.Start(ctx); err != nil {
@@ -1264,6 +1136,8 @@ func TestProcessForceDelete(t *testing.T) {
 }
 
 func TestContainerHostname(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -1310,14 +1184,11 @@ func TestContainerHostname(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := task.Start(ctx); err != nil {
 		t.Error(err)
@@ -1325,8 +1196,13 @@ func TestContainerHostname(t *testing.T) {
 	}
 
 	status := <-statusC
-	if status != 0 {
-		t.Errorf("expected status 0 but received %d", status)
+	code, _, err := status.Result()
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if code != 0 {
+		t.Errorf("expected status 0 but received %d", code)
 	}
 	if _, err := task.Delete(ctx); err != nil {
 		t.Error(err)
@@ -1341,4 +1217,152 @@ func TestContainerHostname(t *testing.T) {
 	if actual != expected {
 		t.Errorf("expected output %q but received %q", expected, actual)
 	}
+}
+
+func TestContainerExitedAtSet(t *testing.T) {
+	t.Parallel()
+
+	client, err := newClient(t, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var (
+		image       Image
+		ctx, cancel = testContext()
+		id          = t.Name()
+	)
+	defer cancel()
+
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withTrue())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	task, err := container.NewTask(ctx, empty())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer task.Delete(ctx)
+
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+	}
+
+	startTime := time.Now()
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+
+	status := <-statusC
+	code, _, _ := status.Result()
+	if code != 0 {
+		t.Errorf("expected status 0 but received %d", code)
+	}
+
+	if s, err := task.Status(ctx); err != nil {
+		t.Errorf("failed to retrieve status: %v", err)
+	} else if s.ExitTime.After(startTime) == false {
+		t.Errorf("exit time is not after start time: %v <= %v", startTime, s.ExitTime)
+	}
+
+	if _, err := task.Delete(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+}
+
+func TestDeleteContainerExecCreated(t *testing.T) {
+	t.Parallel()
+
+	client, err := newClient(t, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var (
+		image       Image
+		ctx, cancel = testContext()
+		id          = t.Name()
+	)
+	defer cancel()
+
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withProcessArgs("sleep", "100"))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	task, err := container.NewTask(ctx, empty())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer task.Delete(ctx)
+
+	finished, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+
+	// start an exec process without running the original container process info
+	processSpec := spec.Process
+	withExecExitStatus(processSpec, 6)
+	execID := t.Name() + "_exec"
+	process, err := task.Exec(ctx, execID, processSpec, empty())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	deleteStatus, err := process.Delete(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	if ec := deleteStatus.ExitCode(); ec != 0 {
+		t.Errorf("expected delete exit code 0 but received %d", ec)
+	}
+	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
+		t.Error(err)
+	}
+	<-finished
 }

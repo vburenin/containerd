@@ -191,6 +191,7 @@ func defaultRemoteContext() *RemoteContext {
 		Resolver: docker.NewResolver(docker.ResolverOptions{
 			Client: http.DefaultClient,
 		}),
+		Snapshotter: DefaultSnapshotter,
 	}
 }
 

@@ -3,7 +3,12 @@
 package containerd
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
+	"runtime"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -15,6 +20,8 @@ import (
 )
 
 func TestContainerUpdate(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -55,14 +62,11 @@ func TestContainerUpdate(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	// check that the task has a limit of 32mb
 	cgroup, err := cgroups.Load(cgroups.V1, cgroups.PidPath(int(task.Pid())))
@@ -104,6 +108,8 @@ func TestContainerUpdate(t *testing.T) {
 }
 
 func TestShimInCgroup(t *testing.T) {
+	t.Parallel()
+
 	client, err := newClient(t, address)
 	if err != nil {
 		t.Fatal(err)
@@ -153,14 +159,12 @@ func TestShimInCgroup(t *testing.T) {
 	}
 	defer task.Delete(ctx)
 
-	statusC := make(chan uint32, 1)
-	go func() {
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+
 	// check to see if the shim is inside the cgroup
 	processes, err := cg.Processes(cgroups.Devices, false)
 	if err != nil {
@@ -210,24 +214,18 @@ func TestDaemonRestart(t *testing.T) {
 	}
 	defer container.Delete(ctx, WithSnapshotCleanup)
 
-	task, err := container.NewTask(ctx, Stdio)
+	task, err := container.NewTask(ctx, empty())
 	if err != nil {
 		t.Error(err)
 		return
 	}
 	defer task.Delete(ctx)
 
-	synC := make(chan struct{})
-	statusC := make(chan uint32, 1)
-	go func() {
-		synC <- struct{}{}
-		status, err := task.Wait(ctx)
-		if err == nil {
-			t.Errorf(`first task.Wait() should have failed with "transport is closing"`)
-		}
-		statusC <- status
-	}()
-	<-synC
+	statusC, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := task.Start(ctx); err != nil {
 		t.Error(err)
@@ -238,7 +236,11 @@ func TestDaemonRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	<-statusC
+	status := <-statusC
+	_, _, err = status.Result()
+	if err == nil {
+		t.Errorf(`first task.Wait() should have failed with "transport is closing"`)
+	}
 
 	waitCtx, waitCancel := context.WithTimeout(ctx, 2*time.Second)
 	serving, err := client.IsServing(waitCtx)
@@ -247,19 +249,134 @@ func TestDaemonRestart(t *testing.T) {
 		t.Fatalf("containerd did not start within 2s: %v", err)
 	}
 
-	go func() {
-		synC <- struct{}{}
-		status, err := task.Wait(ctx)
-		if err != nil {
-			t.Error(err)
-		}
-		statusC <- status
-	}()
-	<-synC
+	statusC, err = task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+		return
+	}
 
 	if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
 
 	<-statusC
+}
+
+func TestContainerAttach(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		// On windows, closing the write side of the pipe closes the read
+		// side, sending an EOF to it and preventing reopening it.
+		// Hence this test will always fails on windows
+		t.Skip("invalid logic on windows")
+	}
+
+	client, err := newClient(t, address)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	var (
+		image       Image
+		ctx, cancel = testContext()
+		id          = t.Name()
+	)
+	defer cancel()
+
+	if runtime.GOOS != "windows" {
+		image, err = client.GetImage(ctx, testImage)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+	}
+
+	spec, err := generateSpec(withImageConfig(ctx, image), withCat())
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	container, err := client.NewContainer(ctx, id, WithSpec(spec), withNewSnapshot(id, image))
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer container.Delete(ctx, WithSnapshotCleanup)
+
+	expected := "hello" + newLine
+
+	direct, err := NewDirectIO(ctx, false)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer direct.Delete()
+	var (
+		wg  sync.WaitGroup
+		buf = bytes.NewBuffer(nil)
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		io.Copy(buf, direct.Stdout)
+	}()
+
+	task, err := container.NewTask(ctx, direct.IOCreate)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer task.Delete(ctx)
+
+	status, err := task.Wait(ctx)
+	if err != nil {
+		t.Error(err)
+	}
+
+	if err := task.Start(ctx); err != nil {
+		t.Error(err)
+		return
+	}
+
+	if _, err := fmt.Fprint(direct.Stdin, expected); err != nil {
+		t.Error(err)
+	}
+
+	// load the container and re-load the task
+	if container, err = client.LoadContainer(ctx, id); err != nil {
+		t.Error(err)
+		return
+	}
+
+	if task, err = container.Task(ctx, direct.IOAttach); err != nil {
+		t.Error(err)
+		return
+	}
+
+	if _, err := fmt.Fprint(direct.Stdin, expected); err != nil {
+		t.Error(err)
+	}
+
+	direct.Stdin.Close()
+
+	if err := task.CloseIO(ctx, WithStdinCloser); err != nil {
+		t.Error(err)
+	}
+
+	<-status
+
+	wg.Wait()
+	if _, err := task.Delete(ctx); err != nil {
+		t.Error(err)
+	}
+
+	output := buf.String()
+
+	// we wrote the same thing after attach
+	expected = expected + expected
+	if output != expected {
+		t.Errorf("expected output %q but received %q", expected, output)
+	}
 }
