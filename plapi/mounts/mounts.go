@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/containerd/containerd/mount"
+	"github.com/containerd/containerd/snapshot"
 )
 
 type VicMount struct {
@@ -50,8 +51,7 @@ func ParseMount(m mount.Mount) (*VicMount, error) {
 
 }
 
-func FormatMountSource(snapType, key, parent string) string {
-	parent = HashParent(parent)
-	key = HashKey(key)
-	return fmt.Sprintf("%s_%s_%s", snapType, parent, key)
+func FormatMountSource(snapType string, si *snapshot.Info) string {
+	return fmt.Sprintf("%s_%s_%s", snapType,
+		HashParent(si.Parent), HashKey(si.Name))
 }

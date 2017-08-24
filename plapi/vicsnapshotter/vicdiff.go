@@ -17,7 +17,6 @@ import (
 	"github.com/containerd/containerd/plapi/vicconfig"
 	"github.com/containerd/containerd/plapi/vicruntime"
 	"github.com/containerd/containerd/plugin"
-	"github.com/containerd/containerd/snapshot"
 	"github.com/go-openapi/swag"
 	digest "github.com/opencontainers/go-digest"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -44,7 +43,7 @@ type VicDiffer struct {
 	store       content.Store
 	storageName string
 	plClient    *client.PortLayer
-	shotter     snapshot.Snapshotter
+	shotter     *VicSnap
 }
 
 var emptyDesc = ocispec.Descriptor{}
@@ -76,21 +75,21 @@ func NewVicDiffer(ic *plugin.InitContext) (interface{}, error) {
 		store:       cstore,
 		plClient:    vicruntime.PortLayerClient(cfg.PortlayerAddress),
 		storageName: "containerd-storage",
-		shotter:     s.(snapshot.Snapshotter),
+		shotter:     s.(*VicSnap),
 	}, nil
 }
 
 func (vd *VicDiffer) Apply(ctx context.Context, desc ocispec.Descriptor, mnts []mount.Mount) (ocispec.Descriptor, error) {
 	log.G(ctx).Debugf("Applying descriptor: %s", desc.Digest)
 	if len(mnts) == 0 {
-		return emptyDesc, errors.New("No mounts was given")
+		return emptyDesc, errors.Wrap(errdefs.ErrInvalidArgument, "No mounts was given")
 	}
-
-	r, err := vd.store.Reader(ctx, desc.Digest)
+	rat, err := vd.store.ReaderAt(ctx, desc.Digest)
+	r := content.NewReader(rat)
 	if err != nil {
 		return emptyDesc, errors.Wrap(err, "failed to get reader from content store")
 	}
-	defer r.Close()
+	defer rat.Close()
 
 	ds, err := compression.DecompressStream(r)
 
@@ -112,6 +111,7 @@ func (vd *VicDiffer) Apply(ctx context.Context, desc ocispec.Descriptor, mnts []
 		return emptyDesc, errors.Wrap(err, "Failed to write image")
 	}
 
+	log.G(ctx).Debugf("Image checksum: %s", checkSum)
 	// Read any trailing data.
 	if _, err := io.Copy(ioutil.Discard, r); err != nil {
 		return emptyDesc, errors.Wrap(err, "Failed to discard not needed data")
@@ -133,17 +133,19 @@ func (vd *VicDiffer) DiffMounts(ctx context.Context, lower, upper []mount.Mount,
 }
 
 func (vd *VicDiffer) writeImage(ctx context.Context, data io.Reader, sum string, m *mounts.VicMount) (string, error) {
-	stat, err := vd.shotter.Stat(ctx, m.Current)
+	stat, err := vd.shotter.StatByHash(ctx, m.Current)
 	if err != nil {
 		log.G(ctx).WithError(err).Error("Could not stat the data")
 		return "", err
 	}
+
+	siBin, _ := dumpSnapInfo(&stat)
 	params := storage.NewUnpackImageParamsWithContext(ctx).
 		WithImageID(m.Current).
 		WithStoreName(vd.storageName).
 		WithParentID(m.Parent).
-		WithMetadatakey(swag.String("orig_name")).
-		WithMetadataval(&stat.Name).
+		WithMetadatakey(swag.String(PortLayerContainerMetadataKey)).
+		WithMetadataval(&siBin).
 		WithImageFile(ioutil.NopCloser(data))
 
 	r, err := vd.plClient.Storage.UnpackImage(params)
