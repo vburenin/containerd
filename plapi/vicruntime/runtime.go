@@ -21,7 +21,6 @@ import (
 	"github.com/containerd/containerd/plugin"
 	"github.com/containerd/containerd/runtime"
 	"github.com/go-openapi/swag"
-	"github.com/pkg/errors"
 )
 
 const (
@@ -30,9 +29,7 @@ const (
 )
 
 var (
-	ErrTaskNotExists     = errors.New("task does not exist")
-	ErrTaskAlreadyExists = errors.New("task already exists")
-	pluginID             = fmt.Sprintf("%s.%s", plugin.RuntimePlugin, runtimeName)
+	pluginID = fmt.Sprintf("%s.%s", plugin.RuntimePlugin, runtimeName)
 )
 
 type contextEvent struct {
